@@ -1,0 +1,26 @@
+[project]
+name = "desktop"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "you" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "pytauri == 0.8.*",
+    "pydantic == 2.*",
+    "anyio == 4.*",
+    "backtesting>=0.6.6",
+    "ccxt>=4.5.77",
+]
+
+[project.entry-points.pytauri]
+ext_mod = "backtest_history_gui.ext_mod"
+
+[build-system]
+requires = ["setuptools >= 80", "setuptools-scm >= 8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages]
+find = { where = ["src-python"] }
