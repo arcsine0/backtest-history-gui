@@ -24,8 +24,14 @@ required-features = ["pytauri/standalone"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# PyTauri 0.8 exhaustively maps WindowEffect. Tauri Utils 2.10 made it
+# non-exhaustive, so keep the compatible Tauri pair until PyTauri is updated.
+tauri = { version = "=2.9.3", features = [] }
+tauri-utils = "=2.9.3"
+tauri-runtime = "=2.9.2"
+wry = "=0.53.4"
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "=2.4.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pyo3 = { version = "0.25" }

@@ -1,34 +1,76 @@
-"""Typed boundaries between GUI, market-data, backtesting, and storage code."""
+"""Local contracts for the Vibe-Trading GUI."""
 
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field
 
-@dataclass(frozen=True)
-class MarketDataRequest:
-    """TODO: Add exchange-specific options (market type, limit, retries) here."""
+PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
+DEFAULT_WORKSPACE = str(Path(PROJECT_ROOT) / "data")
 
-    exchange_id: str
+
+class StrategyParameter(BaseModel):
+    name: str
+    value: str = ""
+    notes: str = ""
+    enabled: bool = True
+    locked: bool = False
+
+
+class StrategySetup(BaseModel):
+    id: int | None = None
+    name: str
+    source: str
+    workspace_path: str = DEFAULT_WORKSPACE
+    parameters: list[StrategyParameter] = Field(default_factory=list)
+    strategy_file: str | None = None
+
+
+class ImportedBacktest(BaseModel):
+    name: str
+    payload: dict[str, Any]
+
+
+class StoredBacktest(BaseModel):
+    id: int
+    name: str
+    imported_at: str
+    metrics: dict[str, Any]
+    trades: list[dict[str, Any]]
+    equity_curve: list[float]
+    equity_timestamps: list[str] = Field(default_factory=list)
+
+
+class StrategyRun(BaseModel):
+    strategy: StrategySetup
+    backtest: StoredBacktest | None = None
+    output: str
+    error: str | None = None
+
+
+class StrategyFileRequest(BaseModel):
+    path: str
+
+
+class AutoOptimizeRequest(BaseModel):
+    strategy: StrategySetup
+    metrics: dict[str, Any]
+
+
+# These contracts keep the existing Backtesting.py and CCXT seams usable while
+# Vibe-Trading remains an optional, separately installed companion.
+class MarketDataRequest(BaseModel):
+    exchange: str
     symbol: str
     timeframe: str
-    since_ms: int | None = None
-    until_ms: int | None = None
 
 
-@dataclass(frozen=True)
-class BacktestRequest:
-    """TODO: Add cash, commission, and strategy parameters as the GUI needs them."""
-
+class BacktestRequest(BaseModel):
     market_data: MarketDataRequest
     strategy_name: str
-    cash: float = 10_000
-    commission: float = 0.0
 
 
-@dataclass(frozen=True)
-class BacktestResult:
-    """TODO: Replace flexible dictionaries with your final result schema."""
-
+class LocalBacktestResult(BaseModel):
     request: BacktestRequest
-    statistics: dict[str, Any]
-    trades: list[dict[str, Any]]
+    metrics: dict[str, Any]
+    trades: list[dict[str, Any]] = Field(default_factory=list)

@@ -152,3 +152,4 @@ __pycache__/
 # Local backtest data and SQLite result backups
 data/*.sqlite3
 data/*.sqlite3-*
+data/vibe-staging/
