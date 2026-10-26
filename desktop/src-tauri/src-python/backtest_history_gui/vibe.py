@@ -21,7 +21,7 @@ def run_prompt(prompt: str) -> str:
     return result.stdout.strip()
 
 
-def backtest_prompt(setup: StrategySetup, run_type: str, metrics: dict[str, object] | None = None) -> str:
+def backtest_prompt(setup: StrategySetup, run_type: str, metrics: dict[str, object] | None = None, goal: str = "") -> str:
     if not setup.source.strip():
         raise ValueError("Add a strategy prompt before running a backtest.")
     unlocked = [parameter for parameter in setup.parameters if parameter.enabled and not parameter.locked]
@@ -37,9 +37,13 @@ def backtest_prompt(setup: StrategySetup, run_type: str, metrics: dict[str, obje
         if not metrics:
             raise ValueError("Run a backtest before data-driven optimization.")
         parameters = f"changing only these unlocked parameters: {', '.join(f'{parameter.name}={parameter.value}' for parameter in unlocked)}. Keep all locked and unspecified settings fixed" if unlocked else "first identifying the strategy's tunable constants, then changing only the most relevant ones"
-        optimisation = f"Analyze these displayed prior-backtest metrics: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest, and preserve every tunable value as an UPPER_CASE module-level constant in code/signal_engine.py."
+        if goal.strip():
+            optimisation = f"Prioritize this goal: {goal.strip()}. Use these displayed prior-backtest metrics as the second priority: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest, and preserve every tunable value as an UPPER_CASE module-level constant in code/signal_engine.py."
+        else:
+            optimisation = f"Prioritize these displayed prior-backtest metrics: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest, and preserve every tunable value as an UPPER_CASE module-level constant in code/signal_engine.py."
     else:
-        optimisation = f"Optimize only these unlocked parameters: {', '.join(f'{parameter.name}={parameter.value}' for parameter in unlocked)}. Keep all other settings fixed and preserve the chosen values as UPPER_CASE module-level constants in code/signal_engine.py."
+        context = f"Use these displayed prior-backtest metrics as the second priority: {json.dumps(metrics)}. " if metrics else ""
+        optimisation = f"Prioritize optimizing only these unlocked parameters: {', '.join(f'{parameter.name}={parameter.value}' for parameter in unlocked)}. {context}Keep all other settings fixed and preserve the chosen values as UPPER_CASE module-level constants in code/signal_engine.py."
     return f"""Backtest the strategy below. {optimisation}
 
 Current parameter configuration: {parameter_shape}. Preserve every listed parameter name and value unless it is explicitly marked OPTIMIZE. LOCKED and FIXED parameters must remain present and unchanged in the next code/configuration.
