@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS strategy_setups (
     source TEXT NOT NULL,
     workspace_path TEXT NOT NULL DEFAULT '',
     optimization_goal TEXT NOT NULL DEFAULT '',
+    vibe_payload_json TEXT NOT NULL DEFAULT '{}',
     parameters_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -42,6 +43,9 @@ def open_database(path: Path) -> sqlite3.Connection:
     if "optimization_goal" not in columns:
         connection.execute("ALTER TABLE strategy_setups ADD COLUMN optimization_goal TEXT NOT NULL DEFAULT ''")
         changed = True
+    if "vibe_payload_json" not in columns:
+        connection.execute("ALTER TABLE strategy_setups ADD COLUMN vibe_payload_json TEXT NOT NULL DEFAULT '{}'")
+        changed = True
     if changed:
         connection.commit()
     return connection
@@ -53,16 +57,17 @@ def save_strategy(connection: sqlite3.Connection, setup: StrategySetup) -> Strat
         workspace = Path(PROJECT_ROOT) / workspace
     setup.workspace_path = str(workspace.resolve())
     encoded = json.dumps([parameter.model_dump() for parameter in setup.parameters])
+    vibe_payload = json.dumps(setup.vibe_payload)
     if setup.id is None:
         cursor = connection.execute(
-            "INSERT INTO strategy_setups (name, source, workspace_path, optimization_goal, parameters_json) VALUES (?, ?, ?, ?, ?)",
-            (setup.name, setup.source, setup.workspace_path, setup.optimization_goal, encoded),
+            "INSERT INTO strategy_setups (name, source, workspace_path, optimization_goal, parameters_json, vibe_payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (setup.name, setup.source, setup.workspace_path, setup.optimization_goal, encoded, vibe_payload),
         )
         setup.id = int(cursor.lastrowid)
     else:
         connection.execute(
-            "UPDATE strategy_setups SET name = ?, source = ?, workspace_path = ?, optimization_goal = ?, parameters_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (setup.name, setup.source, setup.workspace_path, setup.optimization_goal, encoded, setup.id),
+            "UPDATE strategy_setups SET name = ?, source = ?, workspace_path = ?, optimization_goal = ?, parameters_json = ?, vibe_payload_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (setup.name, setup.source, setup.workspace_path, setup.optimization_goal, encoded, vibe_payload, setup.id),
         )
     connection.commit()
     return setup
@@ -200,7 +205,7 @@ def _previous_snapshot(source: Path) -> Path | None:
 
 def list_strategies(connection: sqlite3.Connection) -> list[StrategySetup]:
     return [
-        StrategySetup(id=row["id"], name=row["name"], source=row["source"], workspace_path=row["workspace_path"] or DEFAULT_WORKSPACE, optimization_goal=row["optimization_goal"], parameters=json.loads(row["parameters_json"]))
+        StrategySetup(id=row["id"], name=row["name"], source=row["source"], workspace_path=row["workspace_path"] or DEFAULT_WORKSPACE, optimization_goal=row["optimization_goal"], parameters=json.loads(row["parameters_json"]), vibe_payload=json.loads(row["vibe_payload_json"] or "{}"))
         for row in connection.execute("SELECT * FROM strategy_setups ORDER BY updated_at DESC, id DESC")
     ]
 

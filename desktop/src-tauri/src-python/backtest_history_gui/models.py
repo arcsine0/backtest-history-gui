@@ -24,6 +24,7 @@ class StrategySetup(BaseModel):
     workspace_path: str = DEFAULT_WORKSPACE
     optimization_goal: str = ""
     parameters: list[StrategyParameter] = Field(default_factory=list)
+    vibe_payload: dict[str, Any] = Field(default_factory=dict)
     strategy_file: str | None = None
 
 
@@ -47,6 +48,7 @@ class StrategyRun(BaseModel):
     backtest: StoredBacktest | None = None
     output: str
     error: str | None = None
+    optimization_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class StrategyFileRequest(BaseModel):
@@ -81,6 +83,8 @@ class AutoWorkflowRequest(BaseModel):
     prompt_limit: int = Field(default=5, ge=1, le=50)
     target_metrics: list[str] = Field(default_factory=list)
     start_path: str = ""
+    engine: str = "vibe"
+    ohlcv_path: str = ""
 
 
 class AutoTrial(BaseModel):

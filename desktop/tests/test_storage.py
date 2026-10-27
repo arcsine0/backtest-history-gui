@@ -5,7 +5,10 @@ import sys
 import tempfile
 import types
 import unittest
+import warnings
 from pathlib import Path
+
+import pandas as pd
 
 PACKAGE = Path(__file__).parents[1] / "src-tauri" / "src-python" / "backtest_history_gui"
 package = types.ModuleType("backtest_history_gui")
@@ -25,12 +28,14 @@ def load(name: str):
 models = load("models")
 storage = load("storage")
 vibe = load("vibe")
+market_data = load("market_data")
+backtesting_adapter = load("backtesting_adapter")
 auto_workflow = load("auto_workflow")
 
 
 class StorageTests(unittest.TestCase):
     def test_saves_strategy_and_imported_backtest(self) -> None:
-        setup = models.StrategySetup(name="VWAP ATR", source="entry when price crosses VWAP", optimization_goal="Reduce drawdown")
+        setup = models.StrategySetup(name="VWAP ATR", source="entry when price crosses VWAP", optimization_goal="Reduce drawdown", vibe_payload={"format": "vibe-signal-engine-v1", "signal_engine": "class SignalEngine: pass"})
         with tempfile.TemporaryDirectory() as directory:
             setup.workspace_path = directory
             connection = storage.open_database(Path(directory) / "backtests.sqlite3")
@@ -48,6 +53,7 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(loaded.trades[0]["EntryPrice"], 100)
             self.assertEqual(loaded_setup.parameters, saved_setup.parameters)
             self.assertEqual(loaded_setup.optimization_goal, "Reduce drawdown")
+            self.assertEqual(loaded_setup.vibe_payload["format"], "vibe-signal-engine-v1")
             self.assertEqual(loaded_snapshot.equity_curve, [1000.0, 1012.0])
 
     def test_copies_recycles_and_restores_strategy_save_files(self) -> None:
@@ -100,6 +106,11 @@ class StorageTests(unittest.TestCase):
         nested, _ = vibe.parse_backtest_output(json.dumps({"response": json.dumps({"metrics": {"P/L": 2}, "trades": [], "equity_curve": [1000]})}))
         self.assertEqual(nested["metrics"]["P/L"], 2)
 
+    def test_fvg_prompt_does_not_prescribe_parameter_shape(self) -> None:
+        prompt = vibe.backtest_prompt(models.StrategySetup(name="FVG ATR", source="Use a Fair-Value Gap (FVG) entry with an ATR trailing stop."), "raw")
+        self.assertIn("do not substitute its requested entry model", prompt)
+        self.assertNotIn("FVG_MIN_GAP_ATR", prompt)
+
     def test_strategy_run_can_return_raw_output_without_a_backtest(self) -> None:
         setup = models.StrategySetup(name="VWAP ATR", source="buy when price crosses VWAP")
         diagnostic = models.StrategyRun(strategy=setup, output="plain-text provider response", error="Vibe-Trading did not return the required backtest JSON.")
@@ -131,6 +142,13 @@ class StorageTests(unittest.TestCase):
             strategy_code.write_text("ATR_PERIOD = 14\nTRAILING_MULTIPLIER = 3.0\nIGNORED = 1\n", encoding="utf-8")
             parameters = vibe._parameters_from_strategy_code(strategy_code)
         self.assertEqual([parameter.name for parameter in parameters], ["ATR_PERIOD", "TRAILING_MULTIPLIER"])
+
+    def test_extracts_fvg_specific_parameter_from_strategy_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            strategy_code = Path(directory) / "signal_engine.py"
+            strategy_code.write_text("FVG_MAX_AGE_BARS = 12\nATR_PERIOD = 14\n", encoding="utf-8")
+            parameters = vibe._parameters_from_strategy_code(strategy_code)
+        self.assertEqual([parameter.name for parameter in parameters], ["FVG_MAX_AGE_BARS", "ATR_PERIOD"])
 
     def test_auto_optimization_prompt_includes_displayed_metrics(self) -> None:
         setup = models.StrategySetup(name="VWAP ATR", source="buy when price crosses VWAP", parameters=[models.StrategyParameter(name="atr_period", value="14"), models.StrategyParameter(name="risk_fraction", value="0.01", locked=True)])
@@ -172,7 +190,7 @@ class StorageTests(unittest.TestCase):
     def test_auto_workflow_keeps_its_own_history_database_and_goal_score(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = models.AutoWorkflowRequest(
-                strategy=models.StrategySetup(name="VWAP", source="entry"),
+                strategy=models.StrategySetup(name="VWAP", source="entry", parameters=[models.StrategyParameter(name="period", value="10")]),
                 baseline=models.StoredBacktest(id=1, name="base", imported_at="now", metrics={"Return [%]": 1, "Max. Drawdown [%]": -10}, trades=[], equity_curve=[]),
                 prompt_limit=3,
                 target_metrics=["Return [%]", "Max. Drawdown [%]"],
@@ -187,3 +205,70 @@ class StorageTests(unittest.TestCase):
         protected_baseline = {**request.baseline.metrics, "Win Rate [%]": 50}
         self.assertFalse(auto_workflow._goal_met(collapsed, protected_baseline, request.target_metrics))
         self.assertLess(auto_workflow._score(collapsed, protected_baseline, request.target_metrics), auto_workflow._score({"Return [%]": 2, "Max. Drawdown [%]": -5, "Win Rate [%]": 50}, protected_baseline, request.target_metrics))
+
+    def test_backtesting_workflow_uses_its_own_history_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = models.AutoWorkflowRequest(
+                strategy=models.StrategySetup(name="VWAP", source="entry", parameters=[models.StrategyParameter(name="period", value="10")]),
+                baseline=models.StoredBacktest(id=1, name="base", imported_at="now", metrics={"Return [%]": 1}, trades=[], equity_curve=[]),
+            )
+            workflow = auto_workflow.create_workflow(Path(directory) / "history" / "auto-runs", request)
+
+            def optimize(setup, _limit, _baseline, _targets, database_path, _snapshots, _ohlcv_path):
+                connection = storage.open_database(database_path)
+                try:
+                    backtest = storage.import_backtest(connection, "local", {"metrics": {"Return [%]": 2}, "trades": [], "equity_curve": [100, 102]})
+                finally:
+                    connection.close()
+                optimized = setup.model_copy(deep=True)
+                optimized.parameters[0].value = "20"
+                return models.StrategyRun(strategy=optimized, backtest=backtest, output="done", optimization_history=[{"parameters": {"period": 10}, "score": 0.2}, {"parameters": {"period": 20}, "score": 0.5}])
+
+            completed = auto_workflow.run_backtesting_workflow(Path(workflow.path), request, optimize)
+            history_exists = Path(completed.path, "backtest_history.sqlite3").is_file()
+        self.assertEqual(completed.status, "complete", completed.trials[0].error)
+        self.assertEqual(completed.completed_trials, 2)
+        self.assertEqual(completed.prompt_limit, 2)
+        self.assertEqual(completed.best_trial.parameters[0].value, "20")
+        self.assertEqual(completed.best_backtest.metrics["Return [%]"], 2)
+        self.assertTrue(history_exists)
+
+    def test_resumes_the_auto_run_that_owns_a_loaded_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history_root = Path(directory) / "history" / "auto-runs"
+            initial = models.AutoWorkflowRequest(strategy=models.StrategySetup(name="VWAP", source="entry"), prompt_limit=3)
+            workflow = auto_workflow.create_workflow(history_root, initial)
+            snapshot = Path(workflow.path) / "snapshots" / "VWAP-auto-1.sqlite3"
+            snapshot.write_text("placeholder", encoding="utf-8")
+            auto_workflow._save_trial(Path(workflow.path), 1, "complete", 0.1, initial.strategy, {}, "", "")
+            resumed = auto_workflow.resume_workflow(Path(workflow.path), models.AutoWorkflowRequest(strategy=models.StrategySetup(name="VWAP", source="continued"), prompt_limit=2))
+            owner = auto_workflow.workflow_for_snapshot(history_root, snapshot)
+        self.assertEqual(owner, Path(workflow.path))
+        self.assertEqual(resumed.prompt_limit, 3)
+        self.assertEqual(resumed.status, "queued")
+
+    def test_backtesting_adapter_builds_percentage_and_period_ranges(self) -> None:
+        self.assertEqual(backtesting_adapter._range(10), [6, 8, 10, 12, 14])
+        self.assertEqual(backtesting_adapter._range(0.01), [0.007, 0.0085, 0.01, 0.0115, 0.013])
+
+    def test_reference_ohlcv_must_stay_inside_references_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "references"
+            source = root / "historical" / "btc-5m.csv"
+            source.parent.mkdir(parents=True)
+            source.write_text("timestamp,Open,High,Low,Close,Volume\n2026-01-01,1,2,0.5,1.5,100\n", encoding="utf-8")
+            outside = Path(directory) / "outside.csv"
+            outside.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            self.assertEqual(len(market_data.reference_ohlcv(source, root)), 1)
+            self.assertEqual(market_data.list_reference_ohlcv(root), [str(source.resolve())])
+            with self.assertRaisesRegex(ValueError, "data/references"):
+                market_data.reference_ohlcv(outside, root)
+
+    def test_fractional_backtest_can_trade_an_asset_priced_above_cash(self) -> None:
+        data = pd.DataFrame({"Open": [100000] * 5, "High": [101000] * 5, "Low": [99000] * 5, "Close": [100000] * 5, "Volume": [1] * 5}, index=pd.date_range("2026-01-01", periods=5, freq="D"))
+        source = "import pandas as pd\nclass SignalEngine:\n    def generate(self, data):\n        frame = next(iter(data.values()))\n        return {'BTC-USDT': pd.Series(1, index=frame.index)}\n"
+        strategy = backtesting_adapter._adapter_class(source, {"codes": ["BTC-USDT"]}, {}, data)
+        with warnings.catch_warnings(record=True) as caught:
+            stats = backtesting_adapter.FractionalBacktest(data, strategy, cash=10_000, exclusive_orders=True, finalize_trades=True).run()
+        self.assertGreater(stats["# Trades"], 0)
+        self.assertFalse(any("insufficient margin" in str(item.message) for item in caught))

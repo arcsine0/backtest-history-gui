@@ -5,10 +5,21 @@ import csv
 import json
 import re
 import shutil
+import hashlib
 import subprocess
 from pathlib import Path
 
 from .models import StrategyParameter, StrategySetup
+
+
+def snapshot_payload(run_dir: Path) -> dict[str, object]:
+    """Portable source material for the local Backtesting.py adapter."""
+    config = _load_json(run_dir / "config.json")
+    try:
+        code = (run_dir / "code" / "signal_engine.py").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return {"format": "vibe-signal-engine-v1", "config": config, "signal_engine": code, "sha256": hashlib.sha256(code.encode()).hexdigest()}
 
 
 def run_prompt(prompt: str) -> str:
@@ -31,22 +42,24 @@ def backtest_prompt(setup: StrategySetup, run_type: str, metrics: dict[str, obje
     ) or "No existing parameters; identify tunable constants from the strategy."
     if run_type == "optimized" and not unlocked:
         raise ValueError("Select at least one unlocked parameter.")
+    entry_requirement = "Treat the Strategy prompt as the source of truth: do not substitute its requested entry model or add an unrelated entry filter unless it is explicitly requested. Define every tunable indicator, entry, exit, stop, and risk value that this strategy actually uses as a UPPER_CASE module-level constant in code/signal_engine.py."
     if run_type == "raw":
-        optimisation = "Use the supplied parameters as-is. Define every tunable indicator, entry, exit, stop, and risk value as a UPPER_CASE module-level constant in code/signal_engine.py and use those constants in the strategy. Do not add an unsupported generic parameters field to config.json."
+        optimisation = f"Use the supplied parameters as-is when they remain relevant. {entry_requirement} Do not add an unsupported generic parameters field to config.json."
     elif run_type == "auto":
         if not metrics:
             raise ValueError("Run a backtest before data-driven optimization.")
         parameters = f"changing only these unlocked parameters: {', '.join(f'{parameter.name}={parameter.value}' for parameter in unlocked)}. Keep all locked and unspecified settings fixed" if unlocked else "first identifying the strategy's tunable constants, then changing only the most relevant ones"
         if goal.strip():
-            optimisation = f"Prioritize this goal: {goal.strip()}. Use these displayed prior-backtest metrics as the second priority: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest, and preserve every tunable value as an UPPER_CASE module-level constant in code/signal_engine.py."
+            optimisation = f"Prioritize this goal: {goal.strip()}. Use these displayed prior-backtest metrics as the second priority: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest. {entry_requirement}"
         else:
-            optimisation = f"Prioritize these displayed prior-backtest metrics: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest, and preserve every tunable value as an UPPER_CASE module-level constant in code/signal_engine.py."
+            optimisation = f"Prioritize these displayed prior-backtest metrics: {json.dumps(metrics)}. Improve the strategy by {parameters}, run the improved backtest. {entry_requirement}"
     else:
         context = f"Use these displayed prior-backtest metrics as the second priority: {json.dumps(metrics)}. " if metrics else ""
-        optimisation = f"Prioritize optimizing only these unlocked parameters: {', '.join(f'{parameter.name}={parameter.value}' for parameter in unlocked)}. {context}Keep all other settings fixed and preserve the chosen values as UPPER_CASE module-level constants in code/signal_engine.py."
+        optimisation = f"Prioritize optimizing only these unlocked parameters: {', '.join(f'{parameter.name}={parameter.value}' for parameter in unlocked)}. {context}Keep all other settings fixed. {entry_requirement}"
+    preservation = "For this new raw strategy run, retain listed parameters only when they are relevant to the Strategy prompt; replace stale entry-model constants with constants for the requested entry." if run_type == "raw" else "Preserve every listed parameter name and value unless it is explicitly marked OPTIMIZE. LOCKED and FIXED parameters must remain present and unchanged in the next code/configuration."
     return f"""Backtest the strategy below. {optimisation}
 
-Current parameter configuration: {parameter_shape}. Preserve every listed parameter name and value unless it is explicitly marked OPTIMIZE. LOCKED and FIXED parameters must remain present and unchanged in the next code/configuration.
+Current parameter configuration: {parameter_shape}. {preservation}
 
 Complete a real Vibe-Trading backtest before ending the run. The desktop app imports metrics.csv, trades.csv, and equity.csv from the Vibe run directory; do not finish until those artifacts exist. Resolve a bare BTC request as BTC-USDT on Binance, rather than a Yahoo Finance symbol. Return only one JSON object after the backtest completes. It must have this exact top-level shape:
 {{
@@ -149,7 +162,7 @@ def _parameters_from_strategy_code(path: Path) -> list[StrategyParameter]:
     except (OSError, SyntaxError):
         return []
     parameters: list[StrategyParameter] = []
-    keywords = ("atr", "period", "lookback", "multiplier", "threshold", "stop", "risk", "window", "length", "ratio", "fraction")
+    keywords = ("atr", "period", "lookback", "multiplier", "threshold", "stop", "risk", "window", "length", "ratio", "fraction", "fvg", "gap", "imbalance", "age")
     for node in tree.body:
         target = node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else node.target if isinstance(node, ast.AnnAssign) else None
         value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None

@@ -19,6 +19,7 @@ type Strategy = {
   workspace_path: string;
   optimization_goal: string;
   parameters: Parameter[];
+  vibe_payload?: Record<string, unknown>;
   strategy_file?: string | null;
 };
 type Trade = Record<string, unknown>;
@@ -51,6 +52,8 @@ type RedoContext = {
   metrics: Record<string, unknown>;
   goal: string;
 };
+type GlobalProgress = { scope: "manual" | "auto"; label: string; percent: number };
+type AutoTrialColumn = "Trial" | "Status" | "Score" | "Parameters";
 type AutoTrial = { number: number; status: string; score: number | null; parameters: Parameter[]; metrics: Record<string, unknown>; error: string; snapshot_path: string; backtest_id: number | null };
 type AutoWorkflow = { id: string; name: string; path: string; status: string; prompt_limit: number; target_metrics: string[]; completed_trials: number; stop_requested: boolean; best_trial: AutoTrial | null; best_backtest: Backtest | null; trials: AutoTrial[] };
 
@@ -90,6 +93,20 @@ const autoTargetSearch = ref("");
 const autoWorkflows = ref<AutoWorkflow[]>([]);
 const autoWorkflow = ref<AutoWorkflow | null>(null);
 const autoBusy = ref(false);
+const autoError = ref("");
+const autoEngine = ref<"vibe" | "backtesting">("vibe");
+const referenceOhlcvFiles = ref<string[]>([]);
+const referencesRoot = ref("");
+const autoOhlcvPath = ref("");
+const autoTrialSortColumn = ref<AutoTrialColumn | null>(null);
+const autoTrialSortDirection = ref<SortDirection>(null);
+const autoTrialPage = ref(1);
+const parameterTrial = ref<AutoTrial | null>(null);
+const comparedTrial = ref<AutoTrial | null>(null);
+const comparePickerOpen = ref(false);
+const compareTrialNumber = ref<number | null>(null);
+const compareSearch = ref("");
+const globalProgress = ref<GlobalProgress | null>(null);
 let autoPoll: ReturnType<typeof setInterval> | undefined;
 let undoToastTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -102,22 +119,38 @@ function clonePayload<T>(value: T): T {
   return structuredClone(toRaw(value));
 }
 
+function startProgress(scope: GlobalProgress["scope"], label: string, percent: number) {
+  globalProgress.value = { scope, label, percent };
+}
+
+function updateProgress(label: string, percent: number) {
+  if (globalProgress.value) globalProgress.value = { ...globalProgress.value, label, percent };
+}
+
+function finishProgress(scope: GlobalProgress["scope"]) {
+  if (globalProgress.value?.scope === scope) globalProgress.value = null;
+}
+
 function showResults() {
   resultsPanel.value?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function refresh() {
   try {
-    const [workspace, savedStrategies, savedHistory] = await Promise.all([
+    const [workspace, savedStrategies, savedHistory, referenceRoot, referenceFiles] = await Promise.all([
       call<string>("default_workspace"),
       call<Strategy[]>("list_strategy_setups"),
       call<Backtest[]>("list_imported_backtests"),
+      call<string>("references_root"),
+      call<string[]>("list_reference_ohlcv_files"),
     ]);
     if (!strategy.value.workspace_path)
       strategy.value.workspace_path = workspace;
     defaultWorkspace.value = workspace;
     strategies.value = savedStrategies;
     history.value = savedHistory;
+    referencesRoot.value = referenceRoot;
+    referenceOhlcvFiles.value = referenceFiles;
   } catch (cause) {
     error.value = String(cause);
   }
@@ -128,6 +161,12 @@ async function refreshAutoWorkflows() {
     autoWorkflows.value = await call<AutoWorkflow[]>("list_auto_workflows");
     if (autoWorkflow.value) {
       autoWorkflow.value = await call<AutoWorkflow>("load_auto_workflow", autoWorkflow.value.path);
+      const workflow = autoWorkflow.value;
+      if (["queued", "running"].includes(workflow.status)) {
+        startProgress("auto", workflow.status === "queued" ? "Preparing automated workflow" : `Running trial ${workflow.completed_trials + 1} of ${workflow.prompt_limit}`, Math.min(95, Math.round((workflow.completed_trials / workflow.prompt_limit) * 100)));
+      } else {
+        finishProgress("auto");
+      }
     }
   } catch (cause) {
     error.value = String(cause);
@@ -153,15 +192,41 @@ async function chooseAutoStartFile() {
   await loadAutoStartFile();
 }
 
+function referenceOhlcvLabel(path: string) {
+  const root = referencesRoot.value.replace(/[\\/]+$/, "");
+  return root && path.startsWith(root) ? path.slice(root.length).replace(/^[\\/]+/, "") : path;
+}
+
+async function chooseAutoOhlcvFile() {
+  const path = await open({
+    defaultPath: referencesRoot.value,
+    filters: [{ name: "OHLCV CSV", extensions: ["csv"] }],
+    multiple: false,
+  });
+  if (typeof path !== "string") return;
+  autoOhlcvPath.value = path;
+  if (!referenceOhlcvFiles.value.includes(path))
+    referenceOhlcvFiles.value = [...referenceOhlcvFiles.value, path].sort();
+}
+
 async function loadAutoStartFile() {
   if (!autoStartPath.value) return;
   autoBusy.value = true;
   try {
-    const preview = await call<StrategyRun>("preview_strategy_save_file", { path: autoStartPath.value });
+    const [preview, owningWorkflow] = await Promise.all([
+      call<StrategyRun>("preview_strategy_save_file", { path: autoStartPath.value }),
+      call<AutoWorkflow | null>("auto_workflow_for_snapshot", { path: autoStartPath.value }),
+    ]);
     autoStartBacktest.value = preview.backtest;
     autoTargetMetrics.value = [];
+    autoWorkflow.value = owningWorkflow;
+    if (owningWorkflow) {
+      autoWorkflows.value = [owningWorkflow, ...autoWorkflows.value.filter((workflow) => workflow.path !== owningWorkflow.path)];
+      updateAutoPolling();
+    }
   } catch (cause) {
     autoStartBacktest.value = null;
+    autoWorkflow.value = null;
     error.value = String(cause);
   } finally {
     autoBusy.value = false;
@@ -171,8 +236,27 @@ async function loadAutoStartFile() {
 async function startAutoWorkflow() {
   if (!selected.value && !autoStartPath.value && !currentSavePath.value) return;
   autoBusy.value = true;
+  autoError.value = "";
+  startProgress("auto", "Preparing automated workflow", 5);
   try {
     const startPath = autoStartPath.value || currentSavePath.value;
+    if (autoEngine.value === "backtesting") {
+      updateProgress("Loading saved Vibe strategy and cached OHLCV", 20);
+      const workflow = await call<AutoWorkflow>("run_backtesting_optimization", {
+        strategy: clonePayload(strategy.value),
+        start_path: startPath,
+        prompt_limit: autoPromptLimit.value,
+        target_metrics: clonePayload(autoTargetMetrics.value),
+        ohlcv_path: autoOhlcvPath.value,
+      });
+      updateProgress("Saving Backtesting.py snapshot", 85);
+      autoWorkflow.value = workflow;
+      activeTab.value = "auto";
+      if (workflow.status === "failed") autoError.value = workflow.trials[workflow.trials.length - 1]?.error || "Backtesting.py optimization stopped.";
+      await refreshAutoWorkflows();
+      showResults();
+      return;
+    }
     const workflow = await call<AutoWorkflow>("start_auto_workflow", {
       strategy: clonePayload(strategy.value),
       baseline: startPath ? clonePayload(autoStartBacktest.value) : clonePayload(selected.value),
@@ -185,9 +269,10 @@ async function startAutoWorkflow() {
     await refreshAutoWorkflows();
     updateAutoPolling();
   } catch (cause) {
-    error.value = String(cause);
+    autoError.value = String(cause);
   } finally {
     autoBusy.value = false;
+    finishProgress("auto");
   }
 }
 
@@ -253,9 +338,12 @@ function dismissUndoToast() {
 async function runRaw() {
   busy.value = true;
   runningPrompt.value = "raw";
+  startProgress("manual", "Preparing strategy prompt", 10);
   try {
     const request = clonePayload(strategy.value);
+    updateProgress("Running Vibe-Trading backtest", 45);
     const run = await call<StrategyRun>("run_strategy_backtest", request);
+    updateProgress("Saving strategy snapshot", 85);
     await applyRun(run);
     if (!run.error) lastRedoContext.value = { strategy: request, run_type: "raw", metrics: {}, goal: "" };
     showResults();
@@ -264,6 +352,7 @@ async function runRaw() {
   } finally {
     busy.value = false;
     runningPrompt.value = null;
+    finishProgress("manual");
   }
 }
 
@@ -271,10 +360,13 @@ async function optimize() {
   if (!selected.value) return;
   busy.value = true;
   runningPrompt.value = "optimized";
+  startProgress("manual", "Preparing parameter optimization", 10);
   try {
     const request = clonePayload(strategy.value);
     const metrics = clonePayload(selected.value.metrics);
+    updateProgress("Running Vibe-Trading optimization", 45);
     const run = await call<StrategyRun>("optimize_strategy_backtest", { strategy: request, metrics });
+    updateProgress("Saving optimized snapshot", 85);
     await applyRun(run);
     if (!run.error) lastRedoContext.value = { strategy: request, run_type: "optimized", metrics, goal: "" };
     showResults();
@@ -283,6 +375,7 @@ async function optimize() {
   } finally {
     busy.value = false;
     runningPrompt.value = null;
+    finishProgress("manual");
   }
 }
 
@@ -290,12 +383,15 @@ async function autoOptimize() {
   if (!selected.value) return;
   busy.value = true;
   runningPrompt.value = "auto";
+  startProgress("manual", "Preparing data-driven optimization", 10);
   try {
     const request = clonePayload(strategy.value);
     const metrics = clonePayload(selected.value.metrics);
     const goal = useOptimizationGoal.value ? request.optimization_goal : "";
     request.optimization_goal = goal;
+    updateProgress("Running Vibe-Trading optimization", 45);
     const run = await call<StrategyRun>("auto_optimize_strategy_backtest", { strategy: request, metrics, goal });
+    updateProgress("Saving optimized snapshot", 85);
     await applyRun(run);
     if (!run.error) lastRedoContext.value = { strategy: request, run_type: "auto", metrics, goal };
     showResults();
@@ -304,6 +400,7 @@ async function autoOptimize() {
   } finally {
     busy.value = false;
     runningPrompt.value = null;
+    finishProgress("manual");
   }
 }
 
@@ -443,12 +540,15 @@ async function redoCurrentPrompt() {
   const redoSource = currentSavePath.value;
   busy.value = true;
   runningPrompt.value = "redo";
+  startProgress("manual", "Preparing redo", 10);
   let deleted: RecycledStrategyFile | null = null;
   try {
     deleted = await call<RecycledStrategyFile>("recycle_strategy_save_file_command", { path: redoSource });
     dismissUndoToast();
     loadedSavePaths.value = loadedSavePaths.value.filter((path) => path !== redoSource);
+    updateProgress("Running Vibe-Trading redo", 45);
     const run = await call<StrategyRun>("redo_strategy_backtest", { ...context, redo_source: redoSource });
+    updateProgress("Saving redo snapshot", 85);
     if (run.error) throw new Error(run.error);
     await applyRun(run);
     lastRedoContext.value = context;
@@ -467,6 +567,7 @@ async function redoCurrentPrompt() {
   } finally {
     busy.value = false;
     runningPrompt.value = null;
+    finishProgress("manual");
   }
 }
 
@@ -617,6 +718,25 @@ function toggleAutoTarget(metric: string) {
     : [...autoTargetMetrics.value, metric];
 }
 
+const autoTargetPresets = [
+  { name: "Core", metrics: ["return [%]", "max. drawdown [%]", "sharpe ratio", "profit factor"] },
+  { name: "Profitability", metrics: ["return [%]", "p/l", "p/l [%]", "profit factor", "win rate [%]"] },
+  { name: "Risk-adjusted", metrics: ["max. drawdown [%]", "avg. drawdown [%]", "sharpe ratio", "sortino ratio"] },
+] as const;
+
+function presetMetrics(metrics: readonly string[]) {
+  return goalMetricChoices.value.filter((metric) => metrics.includes(canonicalMetricName(metric) as (typeof metrics)[number]));
+}
+
+function applyAutoTargetPreset(metrics: readonly string[]) {
+  autoTargetMetrics.value = presetMetrics(metrics);
+}
+
+function autoTargetPresetActive(metrics: readonly string[]) {
+  const selected = presetMetrics(metrics);
+  return selected.length > 0 && selected.length === autoTargetMetrics.value.length && selected.every((metric) => autoTargetMetrics.value.includes(metric));
+}
+
 function toggleSort(column: string) {
   if (sortColumn.value !== column) {
     sortColumn.value = column;
@@ -627,6 +747,68 @@ function toggleSort(column: string) {
     sortDirection.value = null;
   } else sortDirection.value = "asc";
   tradePage.value = 1;
+}
+
+function toggleAutoTrialSort(column: AutoTrialColumn) {
+  if (autoTrialSortColumn.value !== column) {
+    autoTrialSortColumn.value = column;
+    autoTrialSortDirection.value = "asc";
+  } else if (autoTrialSortDirection.value === "asc") autoTrialSortDirection.value = "desc";
+  else if (autoTrialSortDirection.value === "desc") {
+    autoTrialSortColumn.value = null;
+    autoTrialSortDirection.value = null;
+  } else autoTrialSortDirection.value = "asc";
+  autoTrialPage.value = 1;
+}
+
+function autoTrialValue(trial: AutoTrial, column: AutoTrialColumn): string | number {
+  if (column === "Trial") return trial.number;
+  if (column === "Status") return trial.status;
+  if (column === "Score") return trial.score ?? "";
+  return trial.parameters.map((parameter) => `${parameter.name}=${parameter.value}`).join(", ") || trial.error;
+}
+
+function openParameterModal(trial: AutoTrial) {
+  parameterTrial.value = trial;
+  comparedTrial.value = null;
+  comparePickerOpen.value = false;
+}
+
+function closeParameterModal() {
+  parameterTrial.value = null;
+  comparedTrial.value = null;
+  comparePickerOpen.value = false;
+}
+
+function openComparePicker() {
+  compareTrialNumber.value = comparedTrial.value?.number ?? null;
+  compareSearch.value = "";
+  comparePickerOpen.value = true;
+}
+
+function confirmComparison() {
+  comparedTrial.value = autoWorkflow.value?.trials.find((trial) => trial.number === compareTrialNumber.value) ?? null;
+  comparePickerOpen.value = false;
+}
+
+function parameterValue(trial: AutoTrial | null, name: string) {
+  return trial?.parameters.find((parameter) => parameter.name === name)?.value ?? "—";
+}
+
+function parameterDiff(name: string) {
+  const base = Number(parameterValue(parameterTrial.value, name));
+  const comparison = Number(parameterValue(comparedTrial.value, name));
+  return Number.isFinite(base) && Number.isFinite(comparison) ? comparison - base : null;
+}
+
+function formatParameterDiff(diff: number | null) {
+  if (diff === null) return "—";
+  const value = Number(diff.toFixed(8));
+  return `(${value > 0 ? "+" : ""}${value})`;
+}
+
+function parameterDiffTone(diff: number | null) {
+  return diff === null || diff === 0 ? "text-base-content/60" : diff > 0 ? "text-success" : "text-error";
 }
 
 const metricGroups = computed(() => {
@@ -683,8 +865,34 @@ const pagedTrades = computed(() =>
     tradePage.value * tradesPerPage,
   ),
 );
+const autoTrialColumns: AutoTrialColumn[] = ["Trial", "Status", "Score", "Parameters"];
+const sortedAutoTrials = computed(() => {
+  const trials = [...(autoWorkflow.value?.trials ?? [])];
+  if (!autoTrialSortColumn.value || !autoTrialSortDirection.value) return trials;
+  const column = autoTrialSortColumn.value;
+  const direction = autoTrialSortDirection.value === "asc" ? 1 : -1;
+  return trials.sort((left, right) => {
+    const a = autoTrialValue(left, column);
+    const b = autoTrialValue(right, column);
+    if (isNumber(a) && isNumber(b)) return (Number(a) - Number(b)) * direction;
+    return String(a).localeCompare(String(b), undefined, { numeric: true }) * direction;
+  });
+});
+const totalAutoTrialPages = computed(() => Math.max(1, Math.ceil(sortedAutoTrials.value.length / tradesPerPage)));
+const pagedAutoTrials = computed(() => sortedAutoTrials.value.slice((autoTrialPage.value - 1) * tradesPerPage, autoTrialPage.value * tradesPerPage));
+const comparisonParameterNames = computed(() => {
+  const names = [
+    ...(parameterTrial.value?.parameters.map((parameter) => parameter.name) ?? []),
+    ...(comparedTrial.value?.parameters.map((parameter) => parameter.name) ?? []),
+  ];
+  return [...new Set(names)];
+});
+const filteredComparisonTrials = computed(() => {
+  const query = compareSearch.value.trim().toLowerCase();
+  return (autoWorkflow.value?.trials ?? []).filter((trial) => trial.number !== parameterTrial.value?.number && (!query || `trial ${trial.number} ${trial.status} ${autoTrialValue(trial, "Parameters")}`.toLowerCase().includes(query)));
+});
 
-const visibleBacktest = computed(() => activeTab.value === "auto" ? autoWorkflow.value?.best_backtest ?? null : selected.value);
+const visibleBacktest = computed(() => activeTab.value === "auto" ? autoWorkflow.value?.best_backtest ?? autoStartBacktest.value ?? selected.value : selected.value);
 const autoBaseline = computed(() => autoStartBacktest.value ?? selected.value);
 const goalMetricChoices = computed(() => Object.keys(autoBaseline.value?.metrics ?? {}));
 const filteredGoalMetricChoices = computed(() => {
@@ -696,6 +904,11 @@ watch([selected, visibleBacktest], () => {
   tradePage.value = 1;
   sortColumn.value = null;
   sortDirection.value = null;
+});
+watch(() => autoWorkflow.value?.path, () => {
+  autoTrialPage.value = 1;
+  autoTrialSortColumn.value = null;
+  autoTrialSortDirection.value = null;
 });
 watch(autoWorkflow, updateAutoPolling, { deep: true });
 onMounted(async () => { await refresh(); await refreshAutoWorkflows(); });
@@ -905,17 +1118,35 @@ onBeforeUnmount(() => { dismissUndoToast(); if (autoPoll) clearInterval(autoPoll
           </div>
           <div class="grid gap-3 md:grid-cols-2">
             <fieldset class="fieldset"><legend class="fieldset-legend">Starting snapshot</legend><div class="join w-full"><input v-model="autoStartPath" class="input join-item w-full" :placeholder="currentSavePath || 'Choose a strategy save with results'" /><button class="btn join-item" :disabled="autoBusy" @click="chooseAutoStartFile">Browse</button><button class="btn join-item" :disabled="autoBusy || !autoStartPath" @click="loadAutoStartFile">Load targets</button></div><p class="label">Loads metrics here only; it does not add anything to Manual history.</p></fieldset>
-            <fieldset class="fieldset"><legend class="fieldset-legend">Prompt budget</legend><input v-model.number="autoPromptLimit" type="number" min="1" max="50" class="input w-full" /><p class="label">Maximum completed Vibe prompts.</p></fieldset>
+            <fieldset class="fieldset"><legend class="fieldset-legend">Optimization budget</legend><input v-model.number="autoPromptLimit" type="number" min="1" max="50" class="input w-full" /><p class="label">{{ autoEngine === 'vibe' ? 'Maximum completed Vibe prompts.' : 'Maximum Backtesting.py parameter evaluations.' }}</p></fieldset>
           </div>
-          <fieldset class="fieldset mt-2"><legend class="fieldset-legend">Early-win targets</legend><p class="mb-2 text-sm text-base-content/70">Selected metrics must improve. Return, P/L, win rate, profit factor, Sharpe, Sortino, and drawdown remain guardrails and can only deviate slightly from the starting snapshot.</p><div v-if="goalMetricChoices.length" class="grid gap-3 md:grid-cols-5"><div class="card card-border bg-base-100 md:col-span-2"><div class="card-body gap-2 p-3"><input v-model="autoTargetSearch" class="input input-sm w-full" placeholder="Search metrics" aria-label="Search early-win metrics" /><ul class="list max-h-56 overflow-y-auto"><li v-for="metric in filteredGoalMetricChoices" :key="metric" class="list-row cursor-pointer px-2 py-2 hover:bg-base-200" :class="autoTargetMetrics.includes(metric) ? 'bg-primary/10' : ''" @click="toggleAutoTarget(metric)"><div class="list-col-grow text-sm">{{ displayMetricName(metric) }}</div><span class="badge badge-sm" :class="autoTargetMetrics.includes(metric) ? 'badge-primary' : 'badge-ghost'">{{ autoTargetMetrics.includes(metric) ? 'Selected' : 'Add' }}</span></li><li v-if="!filteredGoalMetricChoices.length" class="px-2 py-3 text-sm text-base-content/60">No matching metrics.</li></ul></div></div><div class="card card-border bg-base-100 md:col-span-3"><div class="card-body p-3"><p class="mb-2 text-sm font-medium text-base-content/70">Selected targets</p><div v-if="autoTargetMetrics.length" class="flex flex-wrap content-start items-start justify-start gap-2"><button v-for="metric in autoTargetMetrics" :key="metric" type="button" class="badge badge-lg badge-soft cursor-pointer gap-1" :class="metricPillTone(metric)" :aria-label="`Remove ${displayMetricName(metric)}`" @click="toggleAutoTarget(metric)"><span>{{ displayMetricName(metric) }}</span><span aria-hidden="true">×</span></button></div><p v-else class="text-sm text-base-content/60">Choose one or more metrics from the list.</p></div></div></div><p v-else class="text-sm text-base-content/60">Choose a starting snapshot above to load its measurable targets.</p></fieldset>
-          <div class="card-actions mt-3"><button class="btn btn-primary" :disabled="autoBusy || (!selected && !autoStartPath && !currentSavePath)" @click="startAutoWorkflow"><span>Start auto workflow</span><span v-if="autoBusy" class="loading loading-spinner loading-sm" role="status"></span></button></div>
+          <fieldset class="fieldset mt-2"><legend class="fieldset-legend">Early-win targets</legend><p class="mb-2 text-sm text-base-content/70">Selected metrics must improve. Return, P/L, win rate, profit factor, Sharpe, Sortino, and drawdown remain guardrails and can only deviate slightly from the starting snapshot.</p><div v-if="goalMetricChoices.length" class="mb-3 flex flex-wrap items-center gap-2"><span class="text-sm text-base-content/60">Presets</span><button v-for="preset in autoTargetPresets" :key="preset.name" type="button" class="btn btn-sm" :class="autoTargetPresetActive(preset.metrics) ? 'btn-primary' : 'btn-ghost'" @click="applyAutoTargetPreset(preset.metrics)">{{ preset.name }}</button></div><div v-if="goalMetricChoices.length" class="grid gap-3 md:grid-cols-5"><div class="card card-border bg-base-100 md:col-span-2"><div class="card-body gap-2 p-3"><input v-model="autoTargetSearch" class="input input-sm w-full" placeholder="Search metrics" aria-label="Search early-win metrics" /><ul class="list max-h-56 overflow-y-auto"><li v-for="metric in filteredGoalMetricChoices" :key="metric" class="list-row cursor-pointer px-2 py-2 hover:bg-base-200" :class="autoTargetMetrics.includes(metric) ? 'bg-primary/10' : ''" @click="toggleAutoTarget(metric)"><div class="list-col-grow text-sm">{{ displayMetricName(metric) }}</div><span class="badge badge-sm" :class="autoTargetMetrics.includes(metric) ? 'badge-primary' : 'badge-ghost'">{{ autoTargetMetrics.includes(metric) ? 'Selected' : 'Add' }}</span></li><li v-if="!filteredGoalMetricChoices.length" class="px-2 py-3 text-sm text-base-content/60">No matching metrics.</li></ul></div></div><div class="card card-border bg-base-100 md:col-span-3"><div class="card-body p-3"><p class="mb-2 text-sm font-medium text-base-content/70">Selected targets</p><div v-if="autoTargetMetrics.length" class="flex flex-wrap content-start items-start justify-start gap-2"><button v-for="metric in autoTargetMetrics" :key="metric" type="button" class="badge badge-lg badge-soft cursor-pointer gap-1" :class="metricPillTone(metric)" :aria-label="`Remove ${displayMetricName(metric)}`" @click="toggleAutoTarget(metric)"><span>{{ displayMetricName(metric) }}</span><span aria-hidden="true">×</span></button></div><p v-else class="text-sm text-base-content/60">Choose one or more metrics from the list.</p></div></div></div><p v-else class="text-sm text-base-content/60">Choose a starting snapshot above to load its measurable targets.</p></fieldset>
+          <div class="card-actions mt-3 items-end justify-start gap-3"><fieldset class="fieldset w-full max-w-xs"><legend class="fieldset-legend">Optimization engine</legend><select v-model="autoEngine" class="select w-full" aria-label="Optimization engine"><option value="vibe">VibeTrading</option><option value="backtesting">Backtesting.py</option></select></fieldset><fieldset v-if="autoEngine === 'backtesting'" class="fieldset w-full max-w-md"><legend class="fieldset-legend">OHLCV reference data</legend><div class="join w-full"><select v-model="autoOhlcvPath" class="select join-item w-full" aria-label="OHLCV reference data"><option value="">Use snapshot-configured cached data</option><option v-for="path in referenceOhlcvFiles" :key="path" :value="path">{{ referenceOhlcvLabel(path) }}</option></select><button class="btn join-item" :disabled="autoBusy" @click="chooseAutoOhlcvFile">Browse</button></div><p class="label">CSV files under data/references; select a filename for a different timeframe.</p></fieldset><button class="btn btn-primary" :disabled="autoBusy || (!selected && !autoStartPath && !currentSavePath)" @click="startAutoWorkflow"><span>{{ autoEngine === 'vibe' ? 'Start auto workflow' : 'Run Backtesting.py optimizer' }}</span><span v-if="autoBusy" class="loading loading-spinner loading-sm" role="status"></span></button></div>
           <div v-if="autoWorkflow" class="mt-4 border-t border-base-300 pt-4">
             <div class="mb-3 flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-medium">{{ autoWorkflow.name }}</h3><p class="text-sm text-base-content/60">{{ autoWorkflow.completed_trials }} / {{ autoWorkflow.prompt_limit }} trials · {{ autoWorkflow.status.replace('_', ' ') }}</p></div><span class="badge" :class="autoWorkflow.status === 'goal_met' ? 'badge-success' : autoWorkflow.status === 'failed' ? 'badge-error' : 'badge-neutral'">{{ autoWorkflow.status }}</span></div>
             <OptimizationChart :trials="autoWorkflow.trials" />
-            <div class="mt-4 overflow-x-auto"><table class="table table-sm"><thead><tr><th>Trial</th><th>Status</th><th>Score</th><th>Parameters</th></tr></thead><tbody><tr v-for="trial in autoWorkflow.trials" :key="trial.number"><td>{{ trial.number }}</td><td>{{ trial.status }}</td><td :class="metricTone('score', trial.score)">{{ trial.score === null ? '—' : formatMetric(trial.score) }}</td><td class="max-w-md truncate">{{ trial.parameters.map((parameter) => `${parameter.name}=${parameter.value}`).join(', ') || trial.error }}</td></tr></tbody></table></div>
+            <div class="mt-4">
+              <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <p class="text-sm text-base-content/60">{{ sortedAutoTrials.length }} evaluated configurations</p>
+                <div class="join">
+                  <button class="btn btn-sm join-item" :disabled="autoTrialPage === 1" @click="autoTrialPage--">Previous</button>
+                  <span class="btn btn-sm join-item pointer-events-none">{{ autoTrialPage }} / {{ totalAutoTrialPages }}</span>
+                  <button class="btn btn-sm join-item" :disabled="autoTrialPage === totalAutoTrialPages" @click="autoTrialPage++">Next</button>
+                </div>
+              </div>
+              <div class="max-h-[30rem] overflow-auto rounded-box border border-base-300">
+                <table class="table table-pin-rows table-zebra">
+                  <thead><tr><th v-for="column in autoTrialColumns" :key="column"><button class="btn btn-ghost btn-xs whitespace-nowrap font-medium normal-case" @click="toggleAutoTrialSort(column)">{{ column }}<span v-if="autoTrialSortColumn === column" aria-hidden="true">{{ autoTrialSortDirection === 'asc' ? '▲' : '▼' }}</span></button></th></tr></thead>
+                  <tbody><tr v-for="trial in pagedAutoTrials" :key="trial.number"><td>{{ trial.number }}</td><td>{{ trial.status }}</td><td :class="metricTone('score', trial.score)">{{ trial.score === null ? '—' : formatMetric(trial.score) }}</td><td class="max-w-md truncate"><button class="btn btn-ghost btn-xs w-full justify-start font-normal normal-case" @click="openParameterModal(trial)">{{ autoTrialValue(trial, 'Parameters') }}</button></td></tr></tbody>
+                </table>
+              </div>
+            </div>
           </div>
           <div v-if="autoWorkflows.length" class="mt-4"><h3 class="mb-2 font-medium">Workflow history</h3><div class="flex flex-wrap gap-2"><button v-for="workflow in autoWorkflows" :key="workflow.path" class="btn btn-sm" :class="autoWorkflow?.path === workflow.path ? 'btn-neutral' : ''" :disabled="autoBusy" @click="loadAutoWorkflow(workflow.path)">{{ workflow.name }} · {{ workflow.status }}</button></div></div>
         </div>
+      </section>
+      <section v-if="activeTab === 'auto' && autoError" class="alert alert-error mb-5" role="alert">
+        <span>{{ autoError }}</span>
       </section>
       <section class="card bg-base-200">
         <div class="card-body">
@@ -1098,11 +1329,15 @@ onBeforeUnmount(() => { dismissUndoToast(); if (autoPoll) clearInterval(autoPoll
       </div>
     </section>
   </main>
+  <div v-if="globalProgress" class="fixed inset-x-0 bottom-0 z-[55] bg-base-300 px-4 py-2 sm:px-8">
+    <div class="mb-1 flex items-center justify-between gap-4 text-xs text-base-content/80"><span>{{ globalProgress.label }}</span><span>{{ globalProgress.percent }}%</span></div>
+    <progress class="progress progress-primary block h-1 w-full" :value="globalProgress.percent" max="100"></progress>
+  </div>
   <div
     v-if="currentSavePath && saveControlsOpen"
     class="pointer-events-none fixed inset-x-0 bottom-0 z-40 h-32 bg-gradient-to-t from-base-100 via-base-100/90 to-transparent shadow-[inset_0_-2rem_2rem_-2rem_rgb(0_0_0_/_0.7)]"
   ></div>
-  <div v-if="currentSavePath" class="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3">
+  <div v-if="currentSavePath" class="fixed left-1/2 z-50 flex -translate-x-1/2 items-center gap-3" :class="globalProgress ? 'bottom-20' : 'bottom-6'">
     <Transition enter-active-class="transition duration-200 ease-out" enter-from-class="translate-y-3 opacity-0" enter-to-class="translate-y-0 opacity-100" leave-active-class="transition duration-150 ease-in" leave-from-class="translate-y-0 opacity-100" leave-to-class="translate-y-3 opacity-0">
       <div v-if="saveControlsOpen" class="tooltip tooltip-top" data-tip="Save a copy to data/good">
         <button class="btn btn-success btn-circle" :disabled="busy" aria-label="Save current strategy as good" @click="copyCurrentSaveToGood">
@@ -1126,7 +1361,7 @@ onBeforeUnmount(() => { dismissUndoToast(); if (autoPoll) clearInterval(autoPoll
       </div>
     </Transition>
   </div>
-  <button v-if="currentSavePath" class="btn btn-neutral btn-circle fixed bottom-6 right-6 z-50" :aria-label="saveControlsOpen ? 'Hide save controls' : 'Show save controls'" @click="saveControlsOpen = !saveControlsOpen">
+  <button v-if="currentSavePath" class="btn btn-neutral btn-circle fixed right-6 z-50" :class="globalProgress ? 'bottom-20' : 'bottom-6'" :aria-label="saveControlsOpen ? 'Hide save controls' : 'Show save controls'" @click="saveControlsOpen = !saveControlsOpen">
     <svg v-if="saveControlsOpen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-5"><path d="m6 9 6 6 6-6" /></svg>
     <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-5"><path d="m6 15 6-6 6 6" /></svg>
   </button>
@@ -1136,4 +1371,20 @@ onBeforeUnmount(() => { dismissUndoToast(); if (autoPoll) clearInterval(autoPoll
       <button class="btn btn-ghost btn-sm text-base-content" :disabled="busy" @click="undoRecycle">Undo</button>
     </div>
   </div>
+  <dialog v-if="parameterTrial" open class="modal modal-open" aria-modal="true" aria-label="Trial parameters">
+    <div class="modal-box max-w-5xl">
+      <button class="btn btn-ghost btn-sm btn-circle absolute right-3 top-3" aria-label="Close parameter details" @click="closeParameterModal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-5"><path d="M6 6l12 12M18 6 6 18" /></svg></button>
+      <div class="mb-4 flex items-center justify-between gap-3 pr-10"><div><h3 class="text-lg font-semibold">Trial parameters</h3><p class="text-sm text-base-content/60">Inspect a configuration or compare it with another trial.</p></div><button class="btn btn-sm" :disabled="(autoWorkflow?.trials.length ?? 0) < 2" @click="openComparePicker">Compare</button></div>
+      <div class="flex flex-col items-stretch gap-4 lg:flex-row lg:items-center">
+        <section class="min-w-0 flex-1"><h4 class="mb-2 text-center font-medium">Trial {{ parameterTrial.number }}</h4><div class="max-h-96 overflow-auto rounded-box border border-base-300"><table class="table table-sm"><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody><tr v-for="name in comparisonParameterNames" :key="name"><td>{{ name }}</td><td>{{ parameterValue(parameterTrial, name) }}</td></tr></tbody></table></div></section>
+        <svg v-if="comparedTrial" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="mx-auto size-8 shrink-0 rotate-90 lg:rotate-0"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
+        <section v-if="comparedTrial" class="min-w-0 flex-1"><h4 class="mb-2 text-center font-medium">Trial {{ comparedTrial.number }}</h4><div class="max-h-96 overflow-auto rounded-box border border-base-300"><table class="table table-sm"><thead><tr><th>Parameter</th><th>Value</th><th>Diff</th></tr></thead><tbody><tr v-for="name in comparisonParameterNames" :key="name"><td>{{ name }}</td><td>{{ parameterValue(comparedTrial, name) }}</td><td :class="parameterDiffTone(parameterDiff(name))">{{ formatParameterDiff(parameterDiff(name)) }}</td></tr></tbody></table></div></section>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button aria-label="Close parameter details" @click.prevent="closeParameterModal">close</button></form>
+    <div v-if="comparePickerOpen" class="modal modal-open z-[70]" role="dialog" aria-modal="true" aria-label="Choose trial to compare">
+    <div class="modal-box max-w-lg"><h3 class="text-lg font-semibold">Compare with another trial</h3><input v-model="compareSearch" class="input mt-4 w-full" placeholder="Search trial number, status, or parameters" aria-label="Search trials" /><div class="mt-3 max-h-64 overflow-y-auto rounded-box border border-base-300"><button v-for="trial in filteredComparisonTrials" :key="trial.number" class="btn btn-ghost block h-auto w-full rounded-none px-4 py-3 text-left normal-case" :class="compareTrialNumber === trial.number ? 'bg-primary/10' : ''" @click="compareTrialNumber = trial.number"><span class="font-medium">Trial {{ trial.number }}</span><span class="ml-2 text-sm text-base-content/60">{{ trial.status }} · {{ trial.score === null ? '—' : formatMetric(trial.score) }}</span><span class="mt-1 block truncate text-xs text-base-content/60">{{ autoTrialValue(trial, 'Parameters') }}</span></button><p v-if="!filteredComparisonTrials.length" class="p-4 text-sm text-base-content/60">No other trials match this search.</p></div><div class="modal-action"><button class="btn" @click="comparePickerOpen = false">Cancel</button><button class="btn btn-primary" :disabled="compareTrialNumber === null" @click="confirmComparison">Compare</button></div></div>
+      <div class="modal-backdrop"><button aria-label="Cancel comparison" @click="comparePickerOpen = false">close</button></div>
+    </div>
+  </dialog>
 </template>

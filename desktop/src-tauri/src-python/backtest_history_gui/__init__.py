@@ -8,10 +8,12 @@ from pathlib import Path
 from anyio.from_thread import start_blocking_portal
 from pytauri import Commands, builder_factory, context_factory
 
-from .auto_workflow import create_workflow, list_workflows, load_workflow, request_stop, start_workflow
+from .auto_workflow import create_workflow, list_workflows, load_workflow, request_stop, resume_workflow, run_backtesting_workflow, start_workflow, workflow_for_snapshot
+from .backtesting_adapter import optimize_saved_vibe
+from .market_data import list_reference_ohlcv
 from .models import AutoOptimizeRequest, AutoWorkflow, AutoWorkflowRequest, DEFAULT_WORKSPACE, PROJECT_ROOT, ImportedBacktest, RecycledStrategyFile, RecycleStrategyFileRequest, RedoRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup
 from .storage import clear_backtests, copy_strategy_save_to_good, delete_backtest, import_backtest, list_backtests, list_strategies, load_backtest, load_strategy_file, next_snapshot, open_database, recycle_strategy_save_file, restore_strategy_save_file, save_strategy, save_strategy_file
-from .vibe import backtest_prompt, parse_backtest_output, parse_vibe_artifacts, run_prompt, vibe_run_directory
+from .vibe import backtest_prompt, parse_backtest_output, parse_vibe_artifacts, run_prompt, snapshot_payload, vibe_run_directory
 
 commands: Commands = Commands()
 DATABASE = Path(PROJECT_ROOT) / "data" / "backtest_history.sqlite3"
@@ -19,6 +21,8 @@ VIBE_STAGING = Path(PROJECT_ROOT) / "data" / "vibe-staging"
 GOOD_SAVES = Path(PROJECT_ROOT) / "data" / "good"
 RECYCLE_BIN = Path(PROJECT_ROOT) / "data" / "recycle-bin"
 AUTO_RUNS = Path(PROJECT_ROOT) / "data" / "history" / "auto-runs"
+HISTORICAL_CACHE = Path(PROJECT_ROOT) / "data" / "references" / "historical"
+REFERENCES_ROOT = Path(PROJECT_ROOT) / "data" / "references"
 
 
 def _database():
@@ -60,6 +64,7 @@ def _run_backtest(setup: StrategySetup, run_type: str, metrics: dict | None = No
         else:
             staged_run = _stage_vibe_run(run_dir)
             payload, parameters = parse_vibe_artifacts(staged_run)
+            setup.vibe_payload = snapshot_payload(staged_run)
     except ValueError as error:
         return StrategyRun(strategy=setup, output=output, error=str(error))
     setup.parameters = parameters
@@ -87,6 +92,27 @@ def _run_backtest(setup: StrategySetup, run_type: str, metrics: dict | None = No
     return run
 
 
+def _run_backtesting_optimization(setup: StrategySetup, max_tries: int, baseline: dict | None = None, targets: list[str] | None = None, database_path: Path = DATABASE, snapshot_workspace: Path | None = None, ohlcv_path: str = "") -> StrategyRun:
+    try:
+        payload, chosen, optimization = optimize_saved_vibe(setup, HISTORICAL_CACHE, max_tries, baseline, targets, Path(ohlcv_path) if ohlcv_path else None, REFERENCES_ROOT)
+        chosen_by_name = {parameter.name: parameter for parameter in chosen}
+        setup.parameters = [chosen_by_name.get(parameter.name, parameter) for parameter in setup.parameters]
+        payload["optimization"] = optimization
+        connection = open_database(database_path)
+        try:
+            if snapshot_workspace is not None:
+                setup.workspace_path = str(snapshot_workspace)
+            saved = save_strategy(connection, setup)
+            _, path = next_snapshot(connection, saved, "backtesting")
+            snapshot = save_strategy_file(saved, payload, path)
+            result = import_backtest(connection, path.name, payload)
+        finally:
+            connection.close()
+        return StrategyRun(strategy=snapshot, backtest=result, output="Backtesting.py optimization completed from the saved Vibe signal engine.", optimization_history=optimization["optimization_history"])
+    except Exception as error:
+        return StrategyRun(strategy=setup, output="", error=f"Backtesting.py optimizer stopped: {error}")
+
+
 @commands.command()
 async def project_root() -> str:
     return PROJECT_ROOT
@@ -95,6 +121,22 @@ async def project_root() -> str:
 @commands.command()
 async def default_workspace() -> str:
     return DEFAULT_WORKSPACE
+
+
+@commands.command()
+async def references_root() -> str:
+    return str(REFERENCES_ROOT)
+
+
+@commands.command()
+async def list_reference_ohlcv_files() -> list[str]:
+    return await asyncio.to_thread(list_reference_ohlcv, REFERENCES_ROOT)
+
+
+@commands.command()
+async def auto_workflow_for_snapshot(body: StrategyFileRequest) -> AutoWorkflow | None:
+    root = await asyncio.to_thread(workflow_for_snapshot, AUTO_RUNS, Path(body.path))
+    return await asyncio.to_thread(load_workflow, root) if root else None
 
 
 @commands.command()
@@ -138,9 +180,24 @@ async def start_auto_workflow(body: AutoWorkflowRequest) -> AutoWorkflow:
         request.baseline = baseline
     if request.baseline is None:
         raise ValueError("Load a strategy snapshot with backtest results before starting an auto workflow.")
-    workflow = await asyncio.to_thread(create_workflow, AUTO_RUNS, request)
+    root = workflow_for_snapshot(AUTO_RUNS, Path(request.start_path)) if request.start_path.strip() else None
+    workflow = await asyncio.to_thread(resume_workflow, root, request) if root else await asyncio.to_thread(create_workflow, AUTO_RUNS, request)
+    if root:
+        request.prompt_limit = workflow.prompt_limit
     start_workflow(Path(workflow.path), request, _run_backtest)
     return workflow
+
+
+@commands.command()
+async def run_backtesting_optimization(body: AutoWorkflowRequest) -> AutoWorkflow:
+    request = body.model_copy(deep=True)
+    if request.start_path.strip():
+        setup, baseline = await asyncio.to_thread(load_strategy_file, Path(request.start_path))
+        request.strategy = setup
+        request.baseline = baseline
+    root = workflow_for_snapshot(AUTO_RUNS, Path(request.start_path)) if request.start_path.strip() else None
+    workflow = await asyncio.to_thread(resume_workflow, root, request) if root else await asyncio.to_thread(create_workflow, AUTO_RUNS, request)
+    return await asyncio.to_thread(run_backtesting_workflow, Path(workflow.path), request, _run_backtesting_optimization)
 
 
 @commands.command()

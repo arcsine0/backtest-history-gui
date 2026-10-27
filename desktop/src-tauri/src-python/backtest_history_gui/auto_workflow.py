@@ -1,6 +1,7 @@
 """Persistent, bounded AI experiment workflows for strategy snapshots."""
 
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -20,6 +21,19 @@ def workflow_root(history_root: Path, name: str) -> Path:
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "strategy"
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return history_root / f"{slug}-{stamp}"
+
+
+def workflow_for_snapshot(history_root: Path, snapshot_path: Path) -> Path | None:
+    """Return the owning auto-run only for a snapshot safely inside history_root."""
+    try:
+        history = history_root.resolve()
+        snapshot = snapshot_path.resolve()
+        root = snapshot.parent.parent
+    except OSError:
+        return None
+    if snapshot.parent.name not in {"snapshots", "winning-snapshots"} or root.parent != history or not (root / "backtest_history.sqlite3").is_file():
+        return None
+    return root
 
 
 def create_workflow(history_root: Path, request: AutoWorkflowRequest) -> AutoWorkflow:
@@ -46,6 +60,23 @@ def create_workflow(history_root: Path, request: AutoWorkflowRequest) -> AutoWor
         connection.execute(
             "INSERT INTO auto_workflow (id, name, status, prompt_limit, target_metrics_json, setup_json, baseline_json) VALUES (?, ?, 'queued', ?, ?, ?, ?)",
             (identifier, request.strategy.name, request.prompt_limit, json.dumps(request.target_metrics), json.dumps(request.strategy.model_dump()), json.dumps(baseline)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return load_workflow(root)
+
+
+def resume_workflow(root: Path, request: AutoWorkflowRequest) -> AutoWorkflow:
+    """Append a new optimization budget to an existing workflow history."""
+    connection = open_database(root / "backtest_history.sqlite3")
+    try:
+        completed = connection.execute("SELECT COUNT(*) FROM auto_trials").fetchone()[0]
+        prompt_limit = completed + request.prompt_limit
+        baseline = request.baseline.model_dump() if request.baseline else {}
+        connection.execute(
+            "UPDATE auto_workflow SET status = 'queued', prompt_limit = ?, target_metrics_json = ?, setup_json = ?, baseline_json = ?, stop_requested = 0",
+            (prompt_limit, json.dumps(request.target_metrics), json.dumps(request.strategy.model_dump()), json.dumps(baseline)),
         )
         connection.commit()
     finally:
@@ -102,13 +133,46 @@ def start_workflow(root: Path, request: AutoWorkflowRequest, run_backtest: Calla
     threading.Thread(target=_run_workflow, args=(root, request, run_backtest, stop), daemon=True).start()
 
 
+def run_backtesting_workflow(root: Path, request: AutoWorkflowRequest, optimize: Callable[..., StrategyRun]) -> AutoWorkflow:
+    """Persist every Backtesting.py candidate in the shared workflow history."""
+    setup = request.strategy.model_copy(deep=True, update={"id": None})
+    baseline = request.baseline.metrics if request.baseline else {}
+    _set_status(root, "running")
+    try:
+        run = optimize(setup, request.prompt_limit, baseline, request.target_metrics, root / "backtest_history.sqlite3", root / "snapshots", request.ohlcv_path)
+        if run.error or run.backtest is None:
+            _save_trial(root, 1, "failed", None, setup, {}, run.error or "No Backtesting.py result returned.", "")
+            _set_status(root, "failed")
+            return load_workflow(root)
+        candidates = run.optimization_history or [{"parameters": {}, "score": _score(run.backtest.metrics, baseline, request.target_metrics)}]
+        first_number = _next_trial_number(root)
+        _set_prompt_limit(root, first_number - 1 + len(candidates))
+        scores = [_candidate_score(candidate.get("score")) for candidate in candidates]
+        best_offset = max((offset for offset, score in enumerate(scores) if score is not None), key=lambda offset: scores[offset], default=len(candidates) - 1)
+        for offset, (candidate, score) in enumerate(zip(candidates, scores)):
+            number = first_number + offset
+            candidate_setup = _candidate_setup(setup, candidate.get("parameters", {}))
+            is_best = offset == best_offset
+            snapshot_path = run.strategy.strategy_file or "" if is_best else ""
+            _save_trial(root, number, "complete", score, run.strategy if is_best else candidate_setup, run.backtest.metrics if is_best else {}, "", snapshot_path, run.backtest.id if is_best else None)
+        if request.target_metrics and _goal_met(run.backtest.metrics, baseline, request.target_metrics):
+            _copy_winner(root, Path(run.strategy.strategy_file or ""))
+            _set_status(root, "goal_met")
+        else:
+            _set_status(root, "complete")
+    except Exception as error:
+        _save_trial(root, 1, "failed", None, setup, {}, str(error), "")
+        _set_status(root, "failed")
+    return load_workflow(root)
+
+
 def _run_workflow(root: Path, request: AutoWorkflowRequest, run_backtest: Callable[..., StrategyRun], stop: threading.Event) -> None:
     setup = request.strategy.model_copy(deep=True, update={"id": None})
     baseline = request.baseline.metrics if request.baseline else {}
     current_metrics = baseline
     _set_status(root, "running")
     try:
-        for number in range(1, request.prompt_limit + 1):
+        for number in range(_next_trial_number(root), request.prompt_limit + 1):
             if stop.is_set() or _stop_requested(root):
                 _set_status(root, "stopped")
                 return
@@ -136,6 +200,37 @@ def _set_status(root: Path, status: str, error: str = "") -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def _set_prompt_limit(root: Path, prompt_limit: int) -> None:
+    connection = open_database(root / "backtest_history.sqlite3")
+    try:
+        connection.execute("UPDATE auto_workflow SET prompt_limit = ?", (prompt_limit,))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _next_trial_number(root: Path) -> int:
+    connection = open_database(root / "backtest_history.sqlite3")
+    try:
+        return int(connection.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM auto_trials").fetchone()[0])
+    finally:
+        connection.close()
+
+
+def _candidate_score(value: object) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _candidate_setup(setup: StrategySetup, values: dict) -> StrategySetup:
+    candidate = setup.model_copy(deep=True)
+    candidate.parameters = [parameter.model_copy(update={"value": str(values.get(parameter.name, parameter.value))}) for parameter in candidate.parameters]
+    return candidate
 
 
 def _stop_requested(root: Path) -> bool:
