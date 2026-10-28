@@ -149,11 +149,5 @@ __pycache__/
 *.egg-info/
 .python-version
 
-# Local backtest data and SQLite result backups
-data/*.sqlite3
-data/history/
-data/good/
-data/*.sqlite3-*
-data/vibe-staging/
-data/recycle-bin/
-data/references/
+# Local Freqtrade data, generated strategies, and SQLite snapshots
+data/

@@ -1,14 +1,9 @@
 import importlib.util
-import json
-import sqlite3
-import sys
 import tempfile
 import types
 import unittest
-import warnings
 from pathlib import Path
-
-import pandas as pd
+import sys
 
 PACKAGE = Path(__file__).parents[1] / "src-tauri" / "src-python" / "backtest_history_gui"
 package = types.ModuleType("backtest_history_gui")
@@ -27,257 +22,61 @@ def load(name: str):
 
 models = load("models")
 storage = load("storage")
-vibe = load("vibe")
-market_data = load("market_data")
-backtesting_adapter = load("backtesting_adapter")
-auto_workflow = load("auto_workflow")
+templates = load("freqtrade_templates")
+snapshots = load("freqtrade_snapshot")
+runner = load("freqtrade_runner")
 
 
-class StorageTests(unittest.TestCase):
-    def test_saves_strategy_and_imported_backtest(self) -> None:
-        setup = models.StrategySetup(name="VWAP ATR", source="entry when price crosses VWAP", optimization_goal="Reduce drawdown", vibe_payload={"format": "vibe-signal-engine-v1", "signal_engine": "class SignalEngine: pass"})
+class FreqtradeStorageTests(unittest.TestCase):
+    def test_template_snapshot_exports_strategy_and_parameter_file(self):
         with tempfile.TemporaryDirectory() as directory:
-            setup.workspace_path = directory
-            connection = storage.open_database(Path(directory) / "backtests.sqlite3")
-            saved_setup = storage.save_strategy(connection, setup)
-            payload = {"metrics": {"Return [%]": 1.2}, "trades": [{"EntryPrice": 100}], "equity_curve": [1000, 1012]}
-            _, snapshot_path = storage.next_snapshot(connection, saved_setup, "raw")
-            saved_setup = storage.save_strategy_file(saved_setup, payload, snapshot_path)
-            saved_result = storage.import_backtest(connection, snapshot_path.name, payload)
-            loaded = storage.load_backtest(connection, saved_result.id)
-            loaded_setup, loaded_snapshot = storage.load_strategy_file(snapshot_path)
-            connection.close()
-            self.assertEqual(saved_setup.id, 1)
-            self.assertTrue(Path(saved_setup.strategy_file).is_file())
-            self.assertEqual(loaded.metrics["Return [%]"], 1.2)
-            self.assertEqual(loaded.trades[0]["EntryPrice"], 100)
-            self.assertEqual(loaded_setup.parameters, saved_setup.parameters)
-            self.assertEqual(loaded_setup.optimization_goal, "Reduce drawdown")
-            self.assertEqual(loaded_setup.vibe_payload["format"], "vibe-signal-engine-v1")
-            self.assertEqual(loaded_snapshot.equity_curve, [1000.0, 1012.0])
+            setup = templates.make_template_strategy("FVG ATR", "fvg_atr", directory)
+            setup.freqtrade_payload["parameter_file"] = {"params": {"buy": {"ema_period": 120}}}
+            database = storage.open_database(Path(directory) / "history.sqlite3")
+            saved = storage.save_strategy(database, setup)
+            snapshot_path = storage.next_snapshot(database, saved, "backtest")
+            storage.save_strategy_file(saved, {"metrics": {"Return [%]": 1}, "trades": [], "equity_curve": [100, 101]}, snapshot_path)
+            database.close()
+            exported = snapshots.export_strategy(snapshot_path, Path(directory) / "strategies")
+            loaded = snapshots.load_freqtrade_snapshot(snapshot_path)
+            self.assertTrue(exported.is_file())
+            self.assertTrue(exported.with_suffix(".json").is_file())
+            self.assertEqual(loaded["template_id"], "fvg_atr")
+            compile(exported.read_text(encoding="utf-8"), "<strategy>", "exec")
 
-    def test_copies_recycles_and_restores_strategy_save_files(self) -> None:
+    def test_normalizes_freqtrade_result_to_existing_charts_contract(self):
+        result = runner.normalise_result({"strategy": {"FvgAtr": {"starting_balance": 100, "profit_total": 0.1, "profit_total_abs": 10, "total_trades": 1, "trades": [{"close_date": "2026-01-01", "profit_abs": 10}]}}})
+        self.assertEqual(result["metrics"]["Return [%]"], 10.0)
+        self.assertEqual(result["equity_curve"], [100.0, 110.0])
+
+    def test_builds_supported_freqtrade_cli_commands(self):
+        command = runner.backtest_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("results"), Path("data"), "20260101-20260201")
+        self.assertEqual(command[3], "backtesting")
+        self.assertIn("--timerange", command)
+        download = runner.download_data_command("binance", "futures", ["BTC/USDT:USDT"], ["5m"], Path("data"))
+        self.assertEqual(download[3], "download-data")
+        self.assertIn("--datadir", download)
+        hyperopt = runner.hyperopt_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("data"), 10)
+        self.assertEqual(hyperopt[3], "hyperopt")
+        self.assertEqual(hyperopt[hyperopt.index("--spaces") + 1:hyperopt.index("--spaces") + 3], ["enter", "exit"])
+
+    def test_templates_compose_entry_and_dynamic_exit_parameters(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "strategy-raw-1-10272026.sqlite3"
-            source.write_text("snapshot", encoding="utf-8")
-            good_copy = storage.copy_strategy_save_to_good(source, root / "good")
-            recycled, previous = storage.recycle_strategy_save_file(source, root / "recycle-bin")
-            restored = storage.restore_strategy_save_file(source, recycled, root / "recycle-bin")
-            self.assertEqual(good_copy.read_text(encoding="utf-8"), "snapshot")
-            self.assertIsNone(previous)
-            self.assertEqual(restored, source.resolve())
-            self.assertTrue(restored.is_file())
+            for entry in templates.list_entries():
+                for exit_rule in templates.list_exits():
+                    setup = templates.make_template_strategy("Test", "fvg_atr", directory, entry["id"], exit_rule["id"])
+                    self.assertEqual(setup.freqtrade_payload["entry_id"], entry["id"])
+                    self.assertEqual(setup.freqtrade_payload["exit_id"], exit_rule["id"])
+                    compile(setup.freqtrade_payload["strategy_source"], "<strategy>", "exec")
 
-    def test_deletes_and_clears_history(self) -> None:
+    def test_generates_safe_workspace_config_when_not_supplied(self):
         with tempfile.TemporaryDirectory() as directory:
-            connection = storage.open_database(Path(directory) / "backtests.sqlite3")
-            first = storage.import_backtest(connection, "first", {"metrics": {}, "trades": [], "equity_curve": []})
-            storage.import_backtest(connection, "second", {"metrics": {}, "trades": [], "equity_curve": []})
-            storage.delete_backtest(connection, first.id)
-            self.assertEqual(len(storage.list_backtests(connection)), 1)
-            storage.clear_backtests(connection)
-            self.assertEqual(storage.list_backtests(connection), [])
-            connection.close()
+            config_path = runner.ensure_config("", Path(directory), "binance", "futures", ["BTC/USDT:USDT"], ["5m"])
+            config = __import__("json").loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(config["dry_run"])
+            self.assertEqual(config["exchange"]["pair_whitelist"], ["BTC/USDT:USDT"])
+            self.assertEqual(config["trading_mode"], "futures")
 
-    def test_redo_snapshot_uses_a_sub_iteration(self) -> None:
-        setup = models.StrategySetup(name="VWAP ATR", source="entry")
-        with tempfile.TemporaryDirectory() as directory:
-            setup.workspace_path = directory
-            connection = storage.open_database(Path(directory) / "backtests.sqlite3")
-            storage.import_backtest(connection, "VWAP-ATR-raw-1-10272026.sqlite3", {"metrics": {}, "trades": [], "equity_curve": []})
-            storage.import_backtest(connection, "VWAP-ATR-raw-1.1-10272026.sqlite3", {"metrics": {}, "trades": [], "equity_curve": []})
-            iteration, path = storage.next_snapshot(connection, setup, "raw", "VWAP-ATR-raw-1.1-10272026.sqlite3")
-            connection.close()
-        self.assertEqual(iteration, "1.2")
-        self.assertIn("-raw-1.2-", path.name)
 
-    def test_backtest_prompt_requests_the_required_metrics_and_parameters(self) -> None:
-        setup = models.StrategySetup(name="VWAP ATR", source="buy when price crosses VWAP")
-        prompt = vibe.backtest_prompt(setup, "raw")
-        self.assertIn(setup.name, prompt)
-        self.assertIn(setup.source, prompt)
-        self.assertIn("UPPER_CASE module-level constant", prompt)
-        self.assertIn("Max. Drawdown [%]", prompt)
-        self.assertIn("equity_curve", prompt)
-        payload, parameters = vibe.parse_backtest_output(json.dumps({"parameters": [{"name": "VWAP", "value": "20"}], "metrics": {"P/L": 1}, "trades": [], "equity_curve": [1000]}))
-        self.assertEqual(payload["metrics"]["P/L"], 1)
-        self.assertEqual(parameters[0].name, "VWAP")
-        nested, _ = vibe.parse_backtest_output(json.dumps({"response": json.dumps({"metrics": {"P/L": 2}, "trades": [], "equity_curve": [1000]})}))
-        self.assertEqual(nested["metrics"]["P/L"], 2)
-
-    def test_fvg_prompt_does_not_prescribe_parameter_shape(self) -> None:
-        prompt = vibe.backtest_prompt(models.StrategySetup(name="FVG ATR", source="Use a Fair-Value Gap (FVG) entry with an ATR trailing stop."), "raw")
-        self.assertIn("do not substitute its requested entry model", prompt)
-        self.assertNotIn("FVG_MIN_GAP_ATR", prompt)
-
-    def test_strategy_run_can_return_raw_output_without_a_backtest(self) -> None:
-        setup = models.StrategySetup(name="VWAP ATR", source="buy when price crosses VWAP")
-        diagnostic = models.StrategyRun(strategy=setup, output="plain-text provider response", error="Vibe-Trading did not return the required backtest JSON.")
-        self.assertIsNone(diagnostic.backtest)
-        self.assertEqual(diagnostic.output, "plain-text provider response")
-
-    def test_parses_vibe_run_artifacts(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            run_dir = Path(directory)
-            artifacts = run_dir / "artifacts"
-            artifacts.mkdir()
-            (artifacts / "metrics.csv").write_text("total_return,max_drawdown,win_rate,trade_count,profit_factor,sharpe,sortino\n0.1,-0.05,0.6,2,1.5,1.2,1.1\n")
-            (artifacts / "equity.csv").write_text("timestamp,equity,drawdown\n1,100,0\n2,110,-0.01\n")
-            (artifacts / "trades.csv").write_text("timestamp,side,pnl\n1,buy,0\n2,sell,10\n")
-            (run_dir / "config.json").write_text(json.dumps({"parameters": {"atr_period": 14}}))
-            payload, parameters = vibe.parse_vibe_artifacts(run_dir)
-        self.assertEqual(payload["metrics"]["P/L"], 10)
-        self.assertEqual(payload["metrics"]["Return [%]"], 10)
-        self.assertEqual(payload["metrics"]["Win Rate [%]"], 60)
-        self.assertNotIn("Vibe: Profit Factor", payload["metrics"])
-        self.assertNotIn("P/L [%]", payload["metrics"])
-        self.assertEqual(payload["trades"][1]["pnl"], "10")
-        self.assertEqual(payload["equity_timestamps"], ["1", "2"])
-        self.assertEqual(parameters[0].name, "atr_period")
-
-    def test_extracts_tunable_parameters_from_strategy_code_when_config_is_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            strategy_code = Path(directory) / "signal_engine.py"
-            strategy_code.write_text("ATR_PERIOD = 14\nTRAILING_MULTIPLIER = 3.0\nIGNORED = 1\n", encoding="utf-8")
-            parameters = vibe._parameters_from_strategy_code(strategy_code)
-        self.assertEqual([parameter.name for parameter in parameters], ["ATR_PERIOD", "TRAILING_MULTIPLIER"])
-
-    def test_extracts_fvg_specific_parameter_from_strategy_code(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            strategy_code = Path(directory) / "signal_engine.py"
-            strategy_code.write_text("FVG_MAX_AGE_BARS = 12\nATR_PERIOD = 14\n", encoding="utf-8")
-            parameters = vibe._parameters_from_strategy_code(strategy_code)
-        self.assertEqual([parameter.name for parameter in parameters], ["FVG_MAX_AGE_BARS", "ATR_PERIOD"])
-
-    def test_auto_optimization_prompt_includes_displayed_metrics(self) -> None:
-        setup = models.StrategySetup(name="VWAP ATR", source="buy when price crosses VWAP", parameters=[models.StrategyParameter(name="atr_period", value="14"), models.StrategyParameter(name="risk_fraction", value="0.01", locked=True)])
-        prompt = vibe.backtest_prompt(setup, "auto", {"P/L [%]": -2.5, "Win Rate [%]": 45})
-        self.assertIn('"P/L [%]": -2.5', prompt)
-        self.assertIn("atr_period=14 [OPTIMIZE]", prompt)
-        self.assertIn("risk_fraction=0.01 [LOCKED]", prompt)
-        self.assertIn("LOCKED and FIXED parameters must remain present and unchanged", prompt)
-        selected_prompt = vibe.backtest_prompt(setup, "optimized", {"P/L [%]": -2.5})
-        self.assertIn('Prioritize optimizing only these unlocked parameters: atr_period=14.', selected_prompt)
-        self.assertIn('Use these displayed prior-backtest metrics as the second priority: {"P/L [%]": -2.5}', selected_prompt)
-        goal_prompt = vibe.backtest_prompt(setup, "auto", {"P/L [%]": -2.5}, "Improve drawdown without reducing return")
-        self.assertIn("Prioritize this goal: Improve drawdown without reducing return.", goal_prompt)
-        discovery_prompt = vibe.backtest_prompt(models.StrategySetup(name="VWAP", source="buy on VWAP cross"), "auto", {"P/L [%]": -2.5})
-        self.assertIn("first identifying the strategy's tunable constants", discovery_prompt)
-
-    def test_reports_ambiguous_symbol_when_vibe_did_not_backtest(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            run_dir = Path(directory)
-            artifacts = run_dir / "artifacts"
-            artifacts.mkdir()
-            (artifacts / "grounding_evidence.json").write_text(json.dumps({"identity": {"status": "ambiguous"}}))
-            with self.assertRaisesRegex(ValueError, "market symbol is ambiguous"):
-                vibe.parse_vibe_artifacts(run_dir)
-
-    def test_adds_workspace_path_to_existing_strategy_database(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "backtests.sqlite3"
-            legacy = sqlite3.connect(path)
-            legacy.execute("CREATE TABLE strategy_setups (id INTEGER PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, parameters_json TEXT NOT NULL, updated_at TEXT NOT NULL)")
-            legacy.execute("INSERT INTO strategy_setups VALUES (1, 'Legacy', 'source', '[]', '2026-01-01')")
-            legacy.commit()
-            legacy.close()
-            connection = storage.open_database(path)
-            loaded = storage.list_strategies(connection)[0]
-            connection.close()
-        self.assertEqual(loaded.workspace_path, models.DEFAULT_WORKSPACE)
-
-    def test_auto_workflow_keeps_its_own_history_database_and_goal_score(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            request = models.AutoWorkflowRequest(
-                strategy=models.StrategySetup(name="VWAP", source="entry", parameters=[models.StrategyParameter(name="period", value="10")]),
-                baseline=models.StoredBacktest(id=1, name="base", imported_at="now", metrics={"Return [%]": 1, "Max. Drawdown [%]": -10}, trades=[], equity_curve=[]),
-                prompt_limit=3,
-                target_metrics=["Return [%]", "Max. Drawdown [%]"],
-            )
-            workflow = auto_workflow.create_workflow(Path(directory) / "history" / "auto-runs", request)
-            loaded = auto_workflow.load_workflow(Path(workflow.path))
-            self.assertTrue(Path(workflow.path, "backtest_history.sqlite3").is_file())
-        self.assertEqual(loaded.prompt_limit, 3)
-        self.assertGreater(auto_workflow._score({"Return [%]": 2, "Max. Drawdown [%]": -5}, request.baseline.metrics, request.target_metrics), 0)
-        self.assertTrue(auto_workflow._goal_met({"Return [%]": 2, "Max. Drawdown [%]": -5}, request.baseline.metrics, request.target_metrics))
-        collapsed = {"Return [%]": 2, "Max. Drawdown [%]": -5, "Win Rate [%]": 0}
-        protected_baseline = {**request.baseline.metrics, "Win Rate [%]": 50}
-        self.assertFalse(auto_workflow._goal_met(collapsed, protected_baseline, request.target_metrics))
-        self.assertLess(auto_workflow._score(collapsed, protected_baseline, request.target_metrics), auto_workflow._score({"Return [%]": 2, "Max. Drawdown [%]": -5, "Win Rate [%]": 50}, protected_baseline, request.target_metrics))
-
-    def test_backtesting_workflow_uses_its_own_history_database(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            request = models.AutoWorkflowRequest(
-                strategy=models.StrategySetup(name="VWAP", source="entry", parameters=[models.StrategyParameter(name="period", value="10")]),
-                baseline=models.StoredBacktest(id=1, name="base", imported_at="now", metrics={"Return [%]": 1}, trades=[], equity_curve=[]),
-            )
-            workflow = auto_workflow.create_workflow(Path(directory) / "history" / "auto-runs", request)
-
-            def optimize(setup, _limit, _baseline, _targets, database_path, _snapshots, _ohlcv_path):
-                connection = storage.open_database(database_path)
-                try:
-                    backtest = storage.import_backtest(connection, "local", {"metrics": {"Return [%]": 2}, "trades": [], "equity_curve": [100, 102]})
-                finally:
-                    connection.close()
-                optimized = setup.model_copy(deep=True)
-                optimized.parameters[0].value = "20"
-                return models.StrategyRun(strategy=optimized, backtest=backtest, output="done", optimization_history=[{"parameters": {"period": 10}, "score": 0.2}, {"parameters": {"period": 20}, "score": 0.5}])
-
-            completed = auto_workflow.run_backtesting_workflow(Path(workflow.path), request, optimize)
-            history_exists = Path(completed.path, "backtest_history.sqlite3").is_file()
-        self.assertEqual(completed.status, "complete", completed.trials[0].error)
-        self.assertEqual(completed.completed_trials, 2)
-        self.assertEqual(completed.prompt_limit, 2)
-        self.assertEqual(completed.best_trial.parameters[0].value, "20")
-        self.assertEqual(completed.best_backtest.metrics["Return [%]"], 2)
-        self.assertTrue(history_exists)
-
-    def test_resumes_the_auto_run_that_owns_a_loaded_snapshot(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            history_root = Path(directory) / "history" / "auto-runs"
-            initial = models.AutoWorkflowRequest(strategy=models.StrategySetup(name="VWAP", source="entry"), prompt_limit=3)
-            workflow = auto_workflow.create_workflow(history_root, initial)
-            snapshot = Path(workflow.path) / "snapshots" / "VWAP-auto-1.sqlite3"
-            snapshot.write_text("placeholder", encoding="utf-8")
-            auto_workflow._save_trial(Path(workflow.path), 1, "complete", 0.1, initial.strategy, {}, "", "")
-            resumed = auto_workflow.resume_workflow(Path(workflow.path), models.AutoWorkflowRequest(strategy=models.StrategySetup(name="VWAP", source="continued"), prompt_limit=2))
-            owner = auto_workflow.workflow_for_snapshot(history_root, snapshot)
-        self.assertEqual(owner, Path(workflow.path))
-        self.assertEqual(resumed.prompt_limit, 3)
-        self.assertEqual(resumed.status, "queued")
-
-    def test_backtesting_adapter_builds_percentage_and_period_ranges(self) -> None:
-        self.assertEqual(backtesting_adapter.OPTIMIZER_METHOD, "sambo")
-        self.assertEqual(backtesting_adapter._range(10), [6, 8, 10, 12, 14])
-        self.assertEqual(backtesting_adapter._range(0.01), [0.007, 0.0085, 0.01, 0.0115, 0.013])
-
-    def test_reference_ohlcv_must_stay_inside_references_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "references"
-            source = root / "historical" / "btc-5m.csv"
-            source.parent.mkdir(parents=True)
-            source.write_text("timestamp,Open,High,Low,Close,Volume\n2026-01-01,1,2,0.5,1.5,100\n", encoding="utf-8")
-            outside = Path(directory) / "outside.csv"
-            outside.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-            self.assertEqual(len(market_data.reference_ohlcv(source, root)), 1)
-            self.assertEqual(market_data.list_reference_ohlcv(root), [str(source.resolve())])
-            with self.assertRaisesRegex(ValueError, "data/references"):
-                market_data.reference_ohlcv(outside, root)
-
-    def test_fractional_backtest_can_trade_an_asset_priced_above_cash(self) -> None:
-        data = pd.DataFrame({"Open": [100000] * 5, "High": [101000] * 5, "Low": [99000] * 5, "Close": [100000] * 5, "Volume": [1] * 5}, index=pd.date_range("2026-01-01", periods=5, freq="D"))
-        source = "import pandas as pd\nclass SignalEngine:\n    def generate(self, data):\n        frame = next(iter(data.values()))\n        return {'BTC-USDT': pd.Series(1, index=frame.index)}\n"
-        strategy = backtesting_adapter._adapter_class(source, {"codes": ["BTC-USDT"]}, {}, data)
-        with warnings.catch_warnings(record=True) as caught:
-            stats = backtesting_adapter.FractionalBacktest(data, strategy, cash=10_000, exclusive_orders=True, finalize_trades=True).run()
-        self.assertGreater(stats["# Trades"], 0)
-        self.assertFalse(any("insufficient margin" in str(item.message) for item in caught))
-
-    def test_adapter_honours_the_signal_position_fraction(self) -> None:
-        data = pd.DataFrame({"Open": [100000] * 5, "High": [101000] * 5, "Low": [99000] * 5, "Close": [100000] * 5, "Volume": [1] * 5}, index=pd.date_range("2026-01-01", periods=5, freq="D"))
-        source = "import pandas as pd\nclass SignalEngine:\n    def generate(self, data):\n        frame = next(iter(data.values()))\n        return {'BTC-USDT': pd.Series(.1, index=frame.index)}\n"
-        strategy = backtesting_adapter._adapter_class(source, {"codes": ["BTC-USDT"]}, {}, data)
-        stats = backtesting_adapter.FractionalBacktest(data, strategy, cash=10_000, exclusive_orders=True, finalize_trades=True).run()
-        trade = stats["_trades"].iloc[0]
-        self.assertLessEqual(abs(float(trade["Size"]) * float(trade["EntryPrice"])), 1_050)
+if __name__ == "__main__":
+    unittest.main()

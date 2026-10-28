@@ -1,28 +1,19 @@
-"""PyTauri commands for the local Vibe-Trading companion GUI."""
+"""PyTauri commands for the local Freqtrade strategy studio."""
 
 import asyncio
-import os
-import shutil
 from pathlib import Path
 
 from anyio.from_thread import start_blocking_portal
 from pytauri import Commands, builder_factory, context_factory
 
-from .auto_workflow import create_workflow, list_workflows, load_workflow, request_stop, resume_workflow, run_backtesting_workflow, start_workflow, workflow_for_snapshot
-from .backtesting_adapter import optimize_saved_vibe
-from .market_data import list_reference_ohlcv
-from .models import AutoOptimizeRequest, AutoWorkflow, AutoWorkflowRequest, DEFAULT_WORKSPACE, PROJECT_ROOT, ImportedBacktest, RecycledStrategyFile, RecycleStrategyFileRequest, RedoRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup
-from .storage import clear_backtests, copy_strategy_save_to_good, delete_backtest, import_backtest, list_backtests, list_strategies, load_backtest, load_strategy_file, next_snapshot, open_database, recycle_strategy_save_file, restore_strategy_save_file, save_strategy, save_strategy_file
-from .vibe import backtest_prompt, parse_backtest_output, parse_vibe_artifacts, run_prompt, snapshot_payload, vibe_run_directory
+from .freqtrade_runner import backtest_command, data_is_available, download_data_command, ensure_config, hyperopt_command, parse_backtest_directory, read_parameter_file, run as run_freqtrade
+from .freqtrade_snapshot import export_strategy
+from .freqtrade_templates import list_entries, list_exits, list_templates, make_template_strategy
+from .models import DEFAULT_WORKSPACE, PROJECT_ROOT, FreqtradeBacktestRequest, FreqtradeExportRequest, FreqtradeTemplateRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup
+from .storage import import_backtest, list_backtests, list_strategies, load_backtest, load_strategy_file, next_snapshot, open_database, save_strategy, save_strategy_file
 
 commands: Commands = Commands()
-DATABASE = Path(PROJECT_ROOT) / "data" / "backtest_history.sqlite3"
-VIBE_STAGING = Path(PROJECT_ROOT) / "data" / "vibe-staging"
-GOOD_SAVES = Path(PROJECT_ROOT) / "data" / "good"
-RECYCLE_BIN = Path(PROJECT_ROOT) / "data" / "recycle-bin"
-AUTO_RUNS = Path(PROJECT_ROOT) / "data" / "history" / "auto-runs"
-HISTORICAL_CACHE = Path(PROJECT_ROOT) / "data" / "references" / "historical"
-REFERENCES_ROOT = Path(PROJECT_ROOT) / "data" / "references"
+DATABASE = Path(PROJECT_ROOT) / "data" / "freqtrade_history.sqlite3"
 
 
 def _database():
@@ -37,80 +28,56 @@ def _with_database(action):
         connection.close()
 
 
-def _save_strategy(setup: StrategySetup) -> StrategySetup:
-    return _with_database(lambda connection: save_strategy(connection, setup))
-
-
-def _stage_vibe_run(run_dir: Path) -> Path:
-    source_root = Path(os.environ.get("VIBE_TRADING_HOME", Path.home() / ".vibe-trading")) / "runs"
-    source = run_dir.resolve()
-    if source.parent != source_root.resolve() or not (source / "artifacts").is_dir():
-        raise ValueError("Vibe-Trading returned an unsafe or incomplete run directory.")
-    VIBE_STAGING.mkdir(parents=True, exist_ok=True)
-    destination = VIBE_STAGING / source.name
-    if destination.exists():
-        raise ValueError("A Vibe-Trading staging directory already exists for this run.")
-    shutil.move(str(source), str(destination))
-    return destination
-
-
-def _run_backtest(setup: StrategySetup, run_type: str, metrics: dict | None = None, goal: str = "", redo_source: str = "", database_path: Path = DATABASE, snapshot_workspace: Path | None = None) -> StrategyRun:
-    output = run_prompt(backtest_prompt(setup, run_type, metrics, goal))
-    staged_run: Path | None = None
+def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
+    setup = request.strategy.model_copy(deep=True)
+    payload = setup.freqtrade_payload
+    source, class_name = payload.get("strategy_source"), payload.get("class_name")
+    if not isinstance(source, str) or not isinstance(class_name, str):
+        raise ValueError("Create or load a Freqtrade template strategy first.")
+    workspace = Path(setup.workspace_path).expanduser().resolve()
+    pairs = [item.strip() for item in request.pairs.split(",") if item.strip()]
+    timeframes = [item.strip() for item in request.timeframes.split(",") if item.strip()]
+    if not request.exchange.strip() or not pairs or not timeframes:
+        raise ValueError("Exchange, at least one pair, and at least one timeframe are required.")
+    if request.trading_mode not in {"spot", "margin", "futures"}:
+        raise ValueError("Trading mode must be spot, margin, or futures.")
+    config_path = ensure_config(request.config_path, workspace, request.exchange.strip(), request.trading_mode, pairs, timeframes)
+    strategy_path, result_path, data_path = workspace / "freqtrade" / "strategies", workspace / "freqtrade" / "backtest_results", workspace / "freqtrade" / "data"
+    data_output = _download_freqtrade_data(config_path, workspace, data_path, request.exchange, request.trading_mode, request.pairs, request.timeframes, request.timerange)
+    strategy_path.mkdir(parents=True, exist_ok=True)
+    result_path.mkdir(parents=True, exist_ok=True)
+    (strategy_path / f"{class_name}.py").write_text(source, encoding="utf-8")
+    if request.hyperopt_epochs:
+        output = run_freqtrade(hyperopt_command(config_path, class_name, strategy_path, data_path, request.hyperopt_epochs, request.timerange), workspace)
+        payload["parameter_file"] = read_parameter_file(strategy_path, class_name)
+        output += "\n\n" + run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, request.timerange), workspace)
+        run_type = "hyperopt"
+    else:
+        output = run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, request.timerange), workspace)
+        run_type = "backtest"
+    result_payload = parse_backtest_directory(result_path)
+    connection = _database()
     try:
-        run_dir = vibe_run_directory(output)
-        if run_dir is None:
-            payload, parameters = parse_backtest_output(output)
-        else:
-            staged_run = _stage_vibe_run(run_dir)
-            payload, parameters = parse_vibe_artifacts(staged_run)
-            setup.vibe_payload = snapshot_payload(staged_run)
-    except ValueError as error:
-        return StrategyRun(strategy=setup, output=output, error=str(error))
-    setup.parameters = parameters
-
-    def persist(connection):
-        if snapshot_workspace is not None:
-            setup.workspace_path = str(snapshot_workspace)
         saved = save_strategy(connection, setup)
-        _, path = next_snapshot(connection, saved, run_type, redo_source)
-        snapshot = save_strategy_file(saved, payload, path)
-        result = import_backtest(connection, path.name, payload)
-        return StrategyRun(strategy=snapshot, backtest=result, output=output)
-
-    database_path = Path(database_path)
-    connection = open_database(database_path)
-    try:
-        run = persist(connection)
+        snapshot = save_strategy_file(saved, result_payload, next_snapshot(connection, saved, run_type))
+        result = import_backtest(connection, Path(snapshot.strategy_file).name, result_payload)
     finally:
         connection.close()
-    if staged_run is not None:
-        try:
-            shutil.rmtree(staged_run)
-        except OSError as error:
-            run.output = f"{output}\n\nWarning: SQLite conversion succeeded, but staging cleanup failed: {error}"
-    return run
+    return StrategyRun(strategy=snapshot, backtest=result, output=f"Market data update:\n{data_output}\n\nExecution:\n{output}")
 
 
-def _run_backtesting_optimization(setup: StrategySetup, max_tries: int, baseline: dict | None = None, targets: list[str] | None = None, database_path: Path = DATABASE, snapshot_workspace: Path | None = None, ohlcv_path: str = "") -> StrategyRun:
-    try:
-        payload, chosen, optimization = optimize_saved_vibe(setup, HISTORICAL_CACHE, max_tries, baseline, targets, Path(ohlcv_path) if ohlcv_path else None, REFERENCES_ROOT)
-        chosen_by_name = {parameter.name: parameter for parameter in chosen}
-        setup.parameters = [chosen_by_name.get(parameter.name, parameter) for parameter in setup.parameters]
-        payload["optimization"] = optimization
-        connection = open_database(database_path)
-        try:
-            if snapshot_workspace is not None:
-                setup.workspace_path = str(snapshot_workspace)
-            saved = save_strategy(connection, setup)
-            _, path = next_snapshot(connection, saved, "backtesting")
-            snapshot = save_strategy_file(saved, payload, path)
-            result = import_backtest(connection, path.name, payload)
-        finally:
-            connection.close()
-        return StrategyRun(strategy=snapshot, backtest=result, output="Backtesting.py optimization completed from the saved Vibe signal engine.", optimization_history=optimization["optimization_history"])
-    except Exception as error:
-        return StrategyRun(strategy=setup, output="", error=f"Backtesting.py optimizer stopped: {error}")
+def _download_freqtrade_data(config_path: Path, workspace: Path, data_path: Path, exchange: str, trading_mode: str, pair_text: str, timeframe_text: str, timerange: str) -> str:
+    pairs = [item.strip() for item in pair_text.split(",") if item.strip()]
+    timeframes = [item.strip() for item in timeframe_text.split(",") if item.strip()]
+    if not exchange.strip() or not pairs or not timeframes:
+        raise ValueError("Exchange, at least one pair, and at least one timeframe are required.")
+    data_path.mkdir(parents=True, exist_ok=True)
+    if trading_mode not in {"spot", "margin", "futures"}:
+        raise ValueError("Trading mode must be spot, margin, or futures.")
+    output = run_freqtrade(download_data_command(exchange.strip(), trading_mode, pairs, timeframes, data_path, timerange), workspace)
+    if not data_is_available(data_path):
+        raise ValueError("Freqtrade finished without writing usable candle data.")
+    return output
 
 
 @commands.command()
@@ -124,19 +91,34 @@ async def default_workspace() -> str:
 
 
 @commands.command()
-async def references_root() -> str:
-    return str(REFERENCES_ROOT)
+async def list_freqtrade_templates() -> list[dict]:
+    return list_templates()
 
 
 @commands.command()
-async def list_reference_ohlcv_files() -> list[str]:
-    return await asyncio.to_thread(list_reference_ohlcv, REFERENCES_ROOT)
+async def list_freqtrade_entries() -> list[dict]:
+    return list_entries()
 
 
 @commands.command()
-async def auto_workflow_for_snapshot(body: StrategyFileRequest) -> AutoWorkflow | None:
-    root = await asyncio.to_thread(workflow_for_snapshot, AUTO_RUNS, Path(body.path))
-    return await asyncio.to_thread(load_workflow, root) if root else None
+async def list_freqtrade_exits() -> list[dict]:
+    return list_exits()
+
+
+@commands.command()
+async def create_freqtrade_template(body: FreqtradeTemplateRequest) -> StrategySetup:
+    setup = await asyncio.to_thread(make_template_strategy, body.name, body.template_id, body.workspace_path, body.entry_id, body.exit_id)
+    return await asyncio.to_thread(_with_database, lambda connection: save_strategy(connection, setup))
+
+
+@commands.command()
+async def run_freqtrade_backtest(body: FreqtradeBacktestRequest) -> StrategyRun:
+    return await asyncio.to_thread(_run_freqtrade_backtest, body)
+
+
+@commands.command()
+async def export_freqtrade_strategy(body: FreqtradeExportRequest) -> str:
+    return str(await asyncio.to_thread(export_strategy, body.path, body.destination))
 
 
 @commands.command()
@@ -145,109 +127,9 @@ async def list_strategy_setups() -> list[StrategySetup]:
 
 
 @commands.command()
-async def save_strategy_setup(body: StrategySetup) -> StrategySetup:
-    return await asyncio.to_thread(_save_strategy, body)
-
-
-@commands.command()
-async def run_strategy_backtest(body: StrategySetup) -> StrategyRun:
-    return await asyncio.to_thread(_run_backtest, body, "raw")
-
-
-@commands.command()
-async def optimize_strategy_backtest(body: AutoOptimizeRequest) -> StrategyRun:
-    return await asyncio.to_thread(_run_backtest, body.strategy, "optimized", body.metrics)
-
-
-@commands.command()
-async def auto_optimize_strategy_backtest(body: AutoOptimizeRequest) -> StrategyRun:
-    return await asyncio.to_thread(_run_backtest, body.strategy, "auto", body.metrics, body.goal)
-
-
-@commands.command()
-async def redo_strategy_backtest(body: RedoRequest) -> StrategyRun:
-    if body.run_type not in {"raw", "optimized", "auto"}:
-        raise ValueError("Unknown strategy run type.")
-    return await asyncio.to_thread(_run_backtest, body.strategy, body.run_type, body.metrics, body.goal, body.redo_source)
-
-
-@commands.command()
-async def start_auto_workflow(body: AutoWorkflowRequest) -> AutoWorkflow:
-    request = body.model_copy(deep=True)
-    if request.start_path.strip():
-        setup, baseline = await asyncio.to_thread(load_strategy_file, Path(request.start_path))
-        request.strategy = setup
-        request.baseline = baseline
-    if request.baseline is None:
-        raise ValueError("Load a strategy snapshot with backtest results before starting an auto workflow.")
-    root = workflow_for_snapshot(AUTO_RUNS, Path(request.start_path)) if request.start_path.strip() else None
-    workflow = await asyncio.to_thread(resume_workflow, root, request) if root else await asyncio.to_thread(create_workflow, AUTO_RUNS, request)
-    if root:
-        request.prompt_limit = workflow.prompt_limit
-    start_workflow(Path(workflow.path), request, _run_backtest)
-    return workflow
-
-
-@commands.command()
-async def run_backtesting_optimization(body: AutoWorkflowRequest) -> AutoWorkflow:
-    request = body.model_copy(deep=True)
-    if request.start_path.strip():
-        setup, baseline = await asyncio.to_thread(load_strategy_file, Path(request.start_path))
-        request.strategy = setup
-        request.baseline = baseline
-    root = workflow_for_snapshot(AUTO_RUNS, Path(request.start_path)) if request.start_path.strip() else None
-    workflow = await asyncio.to_thread(resume_workflow, root, request) if root else await asyncio.to_thread(create_workflow, AUTO_RUNS, request)
-    return await asyncio.to_thread(run_backtesting_workflow, Path(workflow.path), request, _run_backtesting_optimization)
-
-
-@commands.command()
-async def list_auto_workflows() -> list[AutoWorkflow]:
-    return await asyncio.to_thread(list_workflows, AUTO_RUNS)
-
-
-@commands.command()
-async def load_auto_workflow(body: str) -> AutoWorkflow:
-    return await asyncio.to_thread(load_workflow, Path(body))
-
-
-@commands.command()
-async def stop_auto_workflow(body: str) -> AutoWorkflow:
-    return await asyncio.to_thread(request_stop, Path(body))
-
-
-@commands.command()
 async def load_strategy_save_file(body: StrategyFileRequest) -> StrategyRun:
     setup, result = await asyncio.to_thread(load_strategy_file, Path(body.path))
-    await asyncio.to_thread(_save_strategy, setup)
     return StrategyRun(strategy=setup, backtest=result, output=f"Loaded {body.path}")
-
-
-@commands.command()
-async def preview_strategy_save_file(body: StrategyFileRequest) -> StrategyRun:
-    """Read a snapshot for the Auto workflow without adding it to Manual history."""
-    setup, result = await asyncio.to_thread(load_strategy_file, Path(body.path))
-    return StrategyRun(strategy=setup, backtest=result, output=f"Prepared {body.path}")
-
-
-@commands.command()
-async def copy_strategy_save_to_good_file(body: StrategyFileRequest) -> str:
-    return str(await asyncio.to_thread(copy_strategy_save_to_good, Path(body.path), GOOD_SAVES))
-
-
-@commands.command()
-async def recycle_strategy_save_file_command(body: StrategyFileRequest) -> RecycledStrategyFile:
-    recycle_path, previous_path = await asyncio.to_thread(recycle_strategy_save_file, Path(body.path), RECYCLE_BIN)
-    return RecycledStrategyFile(original_path=body.path, recycle_path=str(recycle_path), previous_path=str(previous_path) if previous_path else None)
-
-
-@commands.command()
-async def restore_strategy_save_file_command(body: RecycleStrategyFileRequest) -> str:
-    return str(await asyncio.to_thread(restore_strategy_save_file, Path(body.original_path), Path(body.recycle_path), RECYCLE_BIN))
-
-
-@commands.command()
-async def import_backtest_result(body: ImportedBacktest) -> StoredBacktest:
-    return await asyncio.to_thread(_with_database, lambda connection: import_backtest(connection, body.name, body.payload))
 
 
 @commands.command()
@@ -258,16 +140,6 @@ async def list_imported_backtests() -> list[StoredBacktest]:
 @commands.command()
 async def load_imported_backtest(body: int) -> StoredBacktest:
     return await asyncio.to_thread(_with_database, lambda connection: load_backtest(connection, body))
-
-
-@commands.command()
-async def delete_imported_backtest(body: int) -> None:
-    await asyncio.to_thread(_with_database, lambda connection: delete_backtest(connection, body))
-
-
-@commands.command()
-async def clear_imported_backtests() -> None:
-    await asyncio.to_thread(_with_database, clear_backtests)
 
 
 def main() -> int:

@@ -11,11 +11,7 @@ dependencies = [
     "pytauri == 0.8.*",
     "pydantic == 2.*",
     "anyio == 4.*",
-    "backtesting>=0.6.6",
-    "ccxt>=4.5.77",
-    "sambo>=1.25.2",
-    "joblib>=1.4",
-    "scikit-learn>=1.5",
+    "freqtrade>=2026.5",
 ]
 
 [project.entry-points.pytauri]
