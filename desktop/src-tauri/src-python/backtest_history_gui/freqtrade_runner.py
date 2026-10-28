@@ -10,6 +10,8 @@ import gzip
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
+from zipfile import ZipFile
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +19,45 @@ from typing import Any
 def download_data_command(exchange: str, trading_mode: str, pairs: list[str], timeframes: list[str], data_path: Path, timerange: str = "") -> list[str]:
     command = [sys.executable, "-m", "freqtrade", "download-data", "--exchange", exchange, "--trading-mode", trading_mode, "--pairs", *pairs, "--timeframes", *timeframes, "--datadir", str(data_path)]
     if timerange:
-        command.extend(["--timerange", timerange])
+        command.extend(["--prepend", "--timerange", timerange])
     return command
+
+
+def default_timerange() -> str:
+    """Five calendar years ending today, used when the UI leaves timerange blank."""
+    end = datetime.now(timezone.utc)
+    try:
+        start = end.replace(year=end.year - 5)
+    except ValueError:  # February 29th
+        start = end.replace(year=end.year - 5, day=28)
+    return f"{start:%Y%m%d}-{end:%Y%m%d}"
+
+
+def walk_forward_ranges(start: datetime, end: datetime, test_count: int = 10) -> tuple[str, list[str]]:
+    """Reserve the first 70% for training and divide the remaining 30% chronologically."""
+    if start >= end:
+        raise ValueError("Downloaded candle range is invalid.")
+    duration = end - start
+    train_end = start + duration * 0.7
+    test_duration = (end - train_end) / test_count
+    def timerange(left: datetime, right: datetime) -> str:
+        return f"{left:%Y%m%dT%H%M}-{right:%Y%m%dT%H%M}"
+    return timerange(start, train_end), [timerange(train_end + test_duration * index, train_end + test_duration * (index + 1)) for index in range(test_count)]
+
+
+def available_candle_range(data_path: Path, pair: str, timeframe: str) -> tuple[datetime, datetime]:
+    """Use the candle file actually downloaded, so unavailable exchange history is skipped."""
+    import pandas as pd
+
+    stem = pair.replace("/", "_").replace(":", "_")
+    files = [path for path in data_path.rglob(f"{stem}-{timeframe}*.feather") if "funding_rate" not in path.name and "-mark" not in path.name]
+    if not files:
+        raise ValueError(f"Freqtrade did not download {pair} {timeframe} candles.")
+    frame = pd.read_feather(files[0], columns=["date"])
+    if frame.empty or "date" not in frame:
+        raise ValueError(f"Downloaded {pair} {timeframe} candles have no usable dates.")
+    dates = pd.to_datetime(frame["date"], utc=True)
+    return dates.min().to_pydatetime(), dates.max().to_pydatetime()
 
 
 def backtest_command(config_path: Path, strategy_name: str, strategy_path: Path, output_path: Path, data_path: Path, timerange: str = "") -> list[str]:
@@ -33,6 +72,18 @@ def hyperopt_command(config_path: Path, strategy_name: str, strategy_path: Path,
     if timerange:
         command.extend(["--timerange", timerange])
     return command
+
+
+def userdir_command(user_data_path: Path) -> list[str]:
+    return [sys.executable, "-m", "freqtrade", "create-userdir", "--userdir", str(user_data_path)]
+
+
+def ensure_userdir(workspace: Path) -> Path:
+    """Create Freqtrade's required standard workspace directory once."""
+    user_data_path = workspace / "user_data"
+    if not user_data_path.is_dir():
+        run(userdir_command(user_data_path), workspace)
+    return user_data_path
 
 
 def ensure_config(config_path: str, workspace: Path, exchange: str, trading_mode: str, pairs: list[str], timeframes: list[str]) -> Path:
@@ -52,6 +103,8 @@ def ensure_config(config_path: str, workspace: Path, exchange: str, trading_mode
         "timeframe": timeframes[0],
         "exchange": {"name": exchange, "key": "", "secret": "", "pair_whitelist": pairs, "pair_blacklist": []},
         "pairlists": [{"method": "StaticPairList"}],
+        "entry_pricing": {"price_side": "same", "use_order_book": True, "order_book_top": 1},
+        "exit_pricing": {"price_side": "same", "use_order_book": True, "order_book_top": 1},
     }
     if trading_mode == "futures":
         config.update({"trading_mode": "futures", "margin_mode": "isolated"})
@@ -82,7 +135,7 @@ def parse_backtest_directory(directory: Path) -> dict[str, Any]:
                 candidates.append(directory / name)
         except (OSError, json.JSONDecodeError):
             pass
-    candidates.extend(sorted(directory.glob("backtest-result*.json*"), key=lambda item: item.stat().st_mtime, reverse=True))
+    candidates.extend(sorted((item for item in directory.glob("backtest-result*") if item.suffix in {".json", ".gz", ".zip"}), key=lambda item: item.stat().st_mtime, reverse=True))
     for candidate in candidates:
         if candidate.is_file():
             return normalise_result(_read_json(candidate))
@@ -126,6 +179,15 @@ def read_parameter_file(strategy_path: Path, strategy_name: str) -> dict[str, An
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    if path.suffix == ".zip":
+        with ZipFile(path) as archive:
+            result_name = next((name for name in archive.namelist() if name.endswith(".json") and not name.endswith("_config.json")), "")
+            if not result_name:
+                raise ValueError("Freqtrade ZIP result has no statistics JSON file.")
+            value = json.loads(archive.read(result_name).decode("utf-8"))
+        if isinstance(value, dict):
+            return value
+        raise ValueError("Freqtrade result must be a JSON object.")
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as handle:
         value = json.load(handle)

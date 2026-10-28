@@ -2,6 +2,9 @@ import importlib.util
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
+from zipfile import ZipFile
 from pathlib import Path
 import sys
 
@@ -53,9 +56,10 @@ class FreqtradeStorageTests(unittest.TestCase):
         command = runner.backtest_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("results"), Path("data"), "20260101-20260201")
         self.assertEqual(command[3], "backtesting")
         self.assertIn("--timerange", command)
-        download = runner.download_data_command("binance", "futures", ["BTC/USDT:USDT"], ["5m"], Path("data"))
+        download = runner.download_data_command("binance", "futures", ["BTC/USDT:USDT"], ["5m"], Path("data"), "20210101-20260101")
         self.assertEqual(download[3], "download-data")
         self.assertIn("--datadir", download)
+        self.assertIn("--prepend", download)
         hyperopt = runner.hyperopt_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("data"), 10)
         self.assertEqual(hyperopt[3], "hyperopt")
         self.assertEqual(hyperopt[hyperopt.index("--spaces") + 1:hyperopt.index("--spaces") + 3], ["enter", "exit"])
@@ -76,6 +80,32 @@ class FreqtradeStorageTests(unittest.TestCase):
             self.assertTrue(config["dry_run"])
             self.assertEqual(config["exchange"]["pair_whitelist"], ["BTC/USDT:USDT"])
             self.assertEqual(config["trading_mode"], "futures")
+            self.assertEqual(config["entry_pricing"]["price_side"], "same")
+            self.assertEqual(config["exit_pricing"]["price_side"], "same")
+            self.assertTrue(config["entry_pricing"]["use_order_book"])
+            self.assertTrue(config["exit_pricing"]["use_order_book"])
+
+    def test_initializes_freqtrade_user_data_directory(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "run") as run_command:
+            user_data = runner.ensure_userdir(Path(directory))
+            self.assertEqual(user_data, Path(directory) / "user_data")
+            run_command.assert_called_once_with(runner.userdir_command(user_data), Path(directory))
+
+    def test_reads_freqtrade_zip_backtest_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result_dir = Path(directory)
+            archive = result_dir / "backtest-result-2026-10-29_05-10-00.zip"
+            with ZipFile(archive, "w") as output:
+                output.writestr("backtest-result-2026-10-29_05-10-00.json", '{"strategy": {"Test": {"starting_balance": 100, "profit_total": 0.1, "trades": []}}}')
+                output.writestr("backtest-result-2026-10-29_05-10-00_config.json", "{}")
+            (result_dir / ".last_result.json").write_text('{"latest_backtest": "backtest-result-2026-10-29_05-10-00.zip"}', encoding="utf-8")
+            self.assertEqual(runner.parse_backtest_directory(result_dir)["metrics"]["Return [%]"], 10.0)
+
+    def test_walk_forward_ranges_reserve_training_and_ten_tests(self):
+        training, tests = runner.walk_forward_ranges(datetime(2021, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc))
+        self.assertTrue(training.startswith("20210101T0000-"))
+        self.assertEqual(len(tests), 10)
+        self.assertTrue(tests[0].startswith(training.split("-")[1]))
 
 
 if __name__ == "__main__":

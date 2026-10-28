@@ -1,15 +1,17 @@
 """PyTauri commands for the local Freqtrade strategy studio."""
 
 import asyncio
+import json
+import statistics
 from pathlib import Path
 
 from anyio.from_thread import start_blocking_portal
 from pytauri import Commands, builder_factory, context_factory
 
-from .freqtrade_runner import backtest_command, data_is_available, download_data_command, ensure_config, hyperopt_command, parse_backtest_directory, read_parameter_file, run as run_freqtrade
+from .freqtrade_runner import available_candle_range, backtest_command, data_is_available, default_timerange, download_data_command, ensure_config, ensure_userdir, hyperopt_command, parse_backtest_directory, read_parameter_file, run as run_freqtrade, walk_forward_ranges
 from .freqtrade_snapshot import export_strategy
 from .freqtrade_templates import list_entries, list_exits, list_templates, make_template_strategy
-from .models import DEFAULT_WORKSPACE, PROJECT_ROOT, FreqtradeBacktestRequest, FreqtradeExportRequest, FreqtradeTemplateRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup
+from .models import DEFAULT_WORKSPACE, PROJECT_ROOT, FreqtradeBacktestRequest, FreqtradeExportRequest, FreqtradeTemplateRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup, ValidationRun, ValidationSlice
 from .storage import import_backtest, list_backtests, list_strategies, load_backtest, load_strategy_file, next_snapshot, open_database, save_strategy, save_strategy_file
 
 commands: Commands = Commands()
@@ -28,6 +30,14 @@ def _with_database(action):
         connection.close()
 
 
+def _write_strategy_files(strategy_path: Path, class_name: str, source: str, payload: dict) -> None:
+    strategy_path.mkdir(parents=True, exist_ok=True)
+    (strategy_path / f"{class_name}.py").write_text(source, encoding="utf-8")
+    parameter_file = payload.get("parameter_file")
+    if isinstance(parameter_file, dict):
+        (strategy_path / f"{class_name}.json").write_text(json.dumps(parameter_file, indent=2), encoding="utf-8")
+
+
 def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
     setup = request.strategy.model_copy(deep=True)
     payload = setup.freqtrade_payload
@@ -41,19 +51,20 @@ def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
         raise ValueError("Exchange, at least one pair, and at least one timeframe are required.")
     if request.trading_mode not in {"spot", "margin", "futures"}:
         raise ValueError("Trading mode must be spot, margin, or futures.")
+    ensure_userdir(workspace)
+    timerange = request.timerange.strip() or default_timerange()
     config_path = ensure_config(request.config_path, workspace, request.exchange.strip(), request.trading_mode, pairs, timeframes)
     strategy_path, result_path, data_path = workspace / "freqtrade" / "strategies", workspace / "freqtrade" / "backtest_results", workspace / "freqtrade" / "data"
-    data_output = _download_freqtrade_data(config_path, workspace, data_path, request.exchange, request.trading_mode, request.pairs, request.timeframes, request.timerange)
-    strategy_path.mkdir(parents=True, exist_ok=True)
+    data_output = _download_freqtrade_data(config_path, workspace, data_path, request.exchange, request.trading_mode, request.pairs, request.timeframes, timerange)
     result_path.mkdir(parents=True, exist_ok=True)
-    (strategy_path / f"{class_name}.py").write_text(source, encoding="utf-8")
+    _write_strategy_files(strategy_path, class_name, source, payload)
     if request.hyperopt_epochs:
-        output = run_freqtrade(hyperopt_command(config_path, class_name, strategy_path, data_path, request.hyperopt_epochs, request.timerange), workspace)
+        output = run_freqtrade(hyperopt_command(config_path, class_name, strategy_path, data_path, request.hyperopt_epochs, timerange), workspace)
         payload["parameter_file"] = read_parameter_file(strategy_path, class_name)
-        output += "\n\n" + run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, request.timerange), workspace)
+        output += "\n\n" + run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, timerange), workspace)
         run_type = "hyperopt"
     else:
-        output = run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, request.timerange), workspace)
+        output = run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, timerange), workspace)
         run_type = "backtest"
     result_payload = parse_backtest_directory(result_path)
     connection = _database()
@@ -64,6 +75,42 @@ def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
     finally:
         connection.close()
     return StrategyRun(strategy=snapshot, backtest=result, output=f"Market data update:\n{data_output}\n\nExecution:\n{output}")
+
+
+def _run_freqtrade_validation(request: FreqtradeBacktestRequest) -> ValidationRun:
+    setup = request.strategy.model_copy(deep=True)
+    payload = setup.freqtrade_payload
+    source, class_name = payload.get("strategy_source"), payload.get("class_name")
+    if not isinstance(source, str) or not isinstance(class_name, str):
+        raise ValueError("Create or load a Freqtrade template strategy first.")
+    workspace = Path(setup.workspace_path).expanduser().resolve()
+    pairs = [item.strip() for item in request.pairs.split(",") if item.strip()]
+    timeframes = [item.strip() for item in request.timeframes.split(",") if item.strip()]
+    if not request.exchange.strip() or not pairs or not timeframes or request.trading_mode not in {"spot", "margin", "futures"}:
+        raise ValueError("A valid exchange, trading mode, pair, and timeframe are required.")
+    ensure_userdir(workspace)
+    timerange = request.timerange.strip() or default_timerange()
+    config_path = ensure_config(request.config_path, workspace, request.exchange.strip(), request.trading_mode, pairs, timeframes)
+    strategy_path, validation_path, data_path = workspace / "freqtrade" / "strategies", workspace / "freqtrade" / "validation_results", workspace / "freqtrade" / "data"
+    data_output = _download_freqtrade_data(config_path, workspace, data_path, request.exchange, request.trading_mode, request.pairs, request.timeframes, timerange)
+    _write_strategy_files(strategy_path, class_name, source, payload)
+    start, end = available_candle_range(data_path, pairs[0], timeframes[0])
+    training_range, test_ranges = walk_forward_ranges(start, end)
+    ranges = [("Train", training_range), *[(f"Test {index + 1}", value) for index, value in enumerate(test_ranges)]]
+    slices: list[ValidationSlice] = []
+    output = [f"Market data update:\n{data_output}", f"Available candle coverage: {start:%Y-%m-%d} to {end:%Y-%m-%d}"]
+    for index, (label, split_range) in enumerate(ranges):
+        result_path = validation_path / f"{index:02d}"
+        result_path.mkdir(parents=True, exist_ok=True)
+        execution = run_freqtrade(backtest_command(config_path, class_name, strategy_path, result_path, data_path, split_range), workspace)
+        result = parse_backtest_directory(result_path)
+        slices.append(ValidationSlice(label=label, timerange=split_range, backtest=StoredBacktest(id=index, name=label, imported_at="just now", metrics=result["metrics"], trades=result["trades"], equity_curve=result["equity_curve"], equity_timestamps=result.get("equity_timestamps", []))))
+        output.append(f"{label}:\n{execution}")
+    returns = [float(item.backtest.metrics.get("Return [%]", 0)) for item in slices[1:]]
+    mean_return = statistics.fmean(returns)
+    return_stddev = statistics.pstdev(returns)
+    stability_score = round(0 if mean_return <= 0 else 100 / (1 + return_stddev), 2)
+    return ValidationRun(training=slices[0], tests=slices[1:], stability_score=stability_score, mean_return=round(mean_return, 4), return_stddev=round(return_stddev, 4), coverage=f"{start:%Y-%m-%d} to {end:%Y-%m-%d}", output="\n\n".join(output))
 
 
 def _download_freqtrade_data(config_path: Path, workspace: Path, data_path: Path, exchange: str, trading_mode: str, pair_text: str, timeframe_text: str, timerange: str) -> str:
@@ -114,6 +161,11 @@ async def create_freqtrade_template(body: FreqtradeTemplateRequest) -> StrategyS
 @commands.command()
 async def run_freqtrade_backtest(body: FreqtradeBacktestRequest) -> StrategyRun:
     return await asyncio.to_thread(_run_freqtrade_backtest, body)
+
+
+@commands.command()
+async def run_freqtrade_validation(body: FreqtradeBacktestRequest) -> ValidationRun:
+    return await asyncio.to_thread(_run_freqtrade_validation, body)
 
 
 @commands.command()

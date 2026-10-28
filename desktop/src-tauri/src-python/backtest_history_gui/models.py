@@ -70,3 +70,19 @@ class FreqtradeBacktestRequest(BaseModel):
     timeframes: str
     timerange: str = ""
     hyperopt_epochs: int = Field(default=0, ge=0, le=10000)
+
+
+class ValidationSlice(BaseModel):
+    label: str
+    timerange: str
+    backtest: StoredBacktest
+
+
+class ValidationRun(BaseModel):
+    training: ValidationSlice
+    tests: list[ValidationSlice]
+    stability_score: float
+    mean_return: float
+    return_stddev: float
+    coverage: str
+    output: str
