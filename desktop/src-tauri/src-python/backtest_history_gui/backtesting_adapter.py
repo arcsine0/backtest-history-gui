@@ -13,6 +13,8 @@ from .market_data import cached_ccxt_ohlcv, reference_ohlcv
 from .models import StrategyParameter, StrategySetup
 from .auto_workflow import _score
 
+OPTIMIZER_METHOD = "sambo"
+
 
 def optimize_saved_vibe(setup: StrategySetup, cache_root: Path, max_tries: int, baseline: dict | None = None, targets: list[str] | None = None, ohlcv_path: Path | None = None, references_root: Path | None = None) -> tuple[dict, list[StrategyParameter], dict]:
     payload = setup.vibe_payload
@@ -37,10 +39,10 @@ def optimize_saved_vibe(setup: StrategySetup, cache_root: Path, max_tries: int, 
     objective = (lambda stats: _score({str(key): _plain(value) for key, value in stats.items() if not str(key).startswith("_")}, baseline, targets)) if baseline else "SQN"
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="If you want to use multi-process optimization.*", category=RuntimeWarning)
-        stats, heatmap = backtest.optimize(maximize=objective, method="grid", max_tries=max_tries, return_heatmap=True, random_state=42, **ranges)
+        stats, heatmap = backtest.optimize(maximize=objective, method=OPTIMIZER_METHOD, max_tries=max_tries, return_heatmap=True, random_state=42, **ranges)
     chosen = [StrategyParameter(name=name, value=str(getattr(stats["_strategy"], name)), notes="Backtesting.py optimized parameter") for name in ranges]
     history = [{"parameters": {name: _plain(value) for name, value in zip(ranges, index if isinstance(index, tuple) else (index,))}, "score": float(score)} for index, score in heatmap.items()]
-    return _payload(stats), chosen, {"optimization_history": history, "cache_rows": len(data)}
+    return _payload(stats), chosen, {"optimization_history": history, "cache_rows": len(data), "method": OPTIMIZER_METHOD}
 
 
 def _adapter_class(source: str, config: dict, values: dict[str, float | int], signal_data: pd.DataFrame) -> type[Strategy]:
@@ -62,10 +64,13 @@ def _adapter_class(source: str, config: dict, values: dict[str, float | int], si
 
     def next(self):
         signal = float(self.signal[-1])
+        # SignalEngine emits a signed position fraction. Honour that risk sizing
+        # and keep one fast-candle trade from consuming the whole account.
+        size = min(.25, abs(signal))
         if signal > 0 and not self.position.is_long:
-            self.buy(size=.95)
+            self.buy(size=size)
         elif signal < 0 and not self.position.is_short:
-            self.sell(size=.95)
+            self.sell(size=size)
         elif signal == 0 and self.position:
             self.position.close()
 

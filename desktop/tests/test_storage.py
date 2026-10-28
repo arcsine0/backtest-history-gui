@@ -248,6 +248,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(resumed.status, "queued")
 
     def test_backtesting_adapter_builds_percentage_and_period_ranges(self) -> None:
+        self.assertEqual(backtesting_adapter.OPTIMIZER_METHOD, "sambo")
         self.assertEqual(backtesting_adapter._range(10), [6, 8, 10, 12, 14])
         self.assertEqual(backtesting_adapter._range(0.01), [0.007, 0.0085, 0.01, 0.0115, 0.013])
 
@@ -272,3 +273,11 @@ class StorageTests(unittest.TestCase):
             stats = backtesting_adapter.FractionalBacktest(data, strategy, cash=10_000, exclusive_orders=True, finalize_trades=True).run()
         self.assertGreater(stats["# Trades"], 0)
         self.assertFalse(any("insufficient margin" in str(item.message) for item in caught))
+
+    def test_adapter_honours_the_signal_position_fraction(self) -> None:
+        data = pd.DataFrame({"Open": [100000] * 5, "High": [101000] * 5, "Low": [99000] * 5, "Close": [100000] * 5, "Volume": [1] * 5}, index=pd.date_range("2026-01-01", periods=5, freq="D"))
+        source = "import pandas as pd\nclass SignalEngine:\n    def generate(self, data):\n        frame = next(iter(data.values()))\n        return {'BTC-USDT': pd.Series(.1, index=frame.index)}\n"
+        strategy = backtesting_adapter._adapter_class(source, {"codes": ["BTC-USDT"]}, {}, data)
+        stats = backtesting_adapter.FractionalBacktest(data, strategy, cash=10_000, exclusive_orders=True, finalize_trades=True).run()
+        trade = stats["_trades"].iloc[0]
+        self.assertLessEqual(abs(float(trade["Size"]) * float(trade["EntryPrice"])), 1_050)
