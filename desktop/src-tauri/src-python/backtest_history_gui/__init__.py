@@ -10,11 +10,11 @@ from threading import Event, Lock
 from anyio.from_thread import start_blocking_portal
 from pytauri import Commands, builder_factory, context_factory
 
-from .freqtrade_runner import RunCancelled, available_candle_range, backtest_command, data_covers_timerange, data_is_available, default_timerange, download_data_command, ensure_config, ensure_userdir, hyperopt_command, parse_backtest_directory, read_parameter_file, run as run_freqtrade, validation_stability_score, walk_forward_ranges, write_goal_hyperopt_loss
+from .freqtrade_runner import RunCancelled, apply_parameter_file_to_source, available_candle_range, backtest_command, data_covers_timerange, data_is_available, default_timerange, download_data_command, ensure_config, ensure_userdir, hyperopt_command, hyperopt_result_names, normalize_parameter_file, parse_backtest_directory, read_hyperopt_report, reconcile_optimization_report, run as run_freqtrade, validation_stability_score, walk_forward_ranges, write_goal_hyperopt_loss
 from .freqtrade_snapshot import export_strategy
 from .freqtrade_templates import list_entries, list_exits, list_templates, make_template_strategy
-from .models import DEFAULT_WORKSPACE, PROJECT_ROOT, FreqtradeBacktestRequest, FreqtradeExportRequest, FreqtradeTemplateRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup, ValidationRun, ValidationSlice
-from .storage import import_backtest, list_backtests, list_strategies, load_backtest, load_strategy_file, next_snapshot, open_database, save_strategy, save_strategy_file, save_validation_file
+from .models import DEFAULT_WORKSPACE, PROJECT_ROOT, FreqtradeBacktestRequest, FreqtradeDataClearRequest, FreqtradeExportRequest, FreqtradeTemplateRequest, StoredBacktest, StrategyFileRequest, StrategyRun, StrategySetup, ValidationRun, ValidationSlice, WorkspaceRequest
+from .storage import clear_freqtrade_results as clear_stored_freqtrade_results, import_backtest, list_backtests, list_downloaded_datasets, list_strategies, load_backtest, load_strategy_file, next_snapshot, open_database, save_strategy, save_strategy_file, save_validation_file
 
 commands: Commands = Commands()
 DATABASE = Path(PROJECT_ROOT) / "data" / "freqtrade_history.sqlite3"
@@ -110,15 +110,32 @@ def _write_strategy_files(strategy_path: Path, class_name: str, source: str, pay
         (strategy_path / f"{class_name}.json").write_text(json.dumps(parameter_file, indent=2), encoding="utf-8")
 
 
+def _refresh_studio_template(setup: StrategySetup) -> tuple[str, str]:
+    """Regenerate deterministic Studio templates so old snapshots receive safe fixes."""
+    payload = setup.freqtrade_payload
+    source, class_name = payload.get("strategy_source"), payload.get("class_name")
+    if payload.get("format") == "freqtrade-strategy-v2" and isinstance(payload.get("entry_id"), str) and isinstance(payload.get("exit_id"), str):
+        refreshed = make_template_strategy(setup.name, setup.template_id, setup.workspace_path, payload["entry_id"], payload["exit_id"])
+        source, class_name = refreshed.freqtrade_payload["strategy_source"], refreshed.freqtrade_payload["class_name"]
+        setup.parameters = refreshed.parameters
+        payload["strategy_source"], payload["class_name"] = source, class_name
+    if not isinstance(source, str) or not isinstance(class_name, str):
+        raise ValueError("Create or load a Freqtrade template strategy first.")
+    parameter_file = payload.get("parameter_file")
+    if isinstance(parameter_file, dict):
+        payload["parameter_file"] = normalize_parameter_file(parameter_file)
+        source = apply_parameter_file_to_source(source, payload["parameter_file"])
+        payload["strategy_source"] = source
+    return source, class_name
+
+
 def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
     _start_progress("Checking strategy run inputs")
     try:
         setup = request.strategy.model_copy(deep=True)
         payload = setup.freqtrade_payload
         payload["optimization_goal"] = request.optimization_goal.model_dump()
-        source, class_name = payload.get("strategy_source"), payload.get("class_name")
-        if not isinstance(source, str) or not isinstance(class_name, str):
-            raise ValueError("Create or load a Freqtrade template strategy first.")
+        source, class_name = _refresh_studio_template(setup)
         workspace = Path(setup.workspace_path).expanduser().resolve()
         pairs = [item.strip() for item in request.pairs.split(",") if item.strip()]
         timeframes = [item.strip() for item in request.timeframes.split(",") if item.strip()]
@@ -143,6 +160,7 @@ def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
         if request.hyperopt_epochs:
             _set_progress("Optimizing parameters", 45, f"Starting epoch 1 of {request.hyperopt_epochs}")
             loss_name, loss_path = write_goal_hyperopt_loss(workspace, request.optimization_goal.model_dump())
+            previous_hyperopt_results = hyperopt_result_names(workspace, class_name)
             output = _run_command(
                 hyperopt_command(config_path, class_name, strategy_path, data_path, request.hyperopt_epochs, timerange, loss_name, loss_path),
                 workspace,
@@ -151,7 +169,12 @@ def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
             )
             _raise_if_cancelled()
             _set_progress("Reading optimized parameters", 75, "Loading Freqtrade's parameter export")
-            payload["parameter_file"] = read_parameter_file(strategy_path, class_name)
+            optimization_report, selected_parameter_file = read_hyperopt_report(workspace, class_name, timerange, request.optimization_goal.model_dump(), previous_hyperopt_results)
+            payload["parameter_file"] = normalize_parameter_file(selected_parameter_file)
+            source = apply_parameter_file_to_source(source, payload["parameter_file"])
+            payload["strategy_source"] = source
+            _write_strategy_files(strategy_path, class_name, source, payload)
+            payload["optimization_report"] = optimization_report.model_dump()
             _set_progress("Backtesting optimized parameters", 80, "Simulating optimized trades")
             output += "\n\n" + _run_command(backtest_command(config_path, class_name, strategy_path, result_path, data_path, timerange), workspace)
             run_type = "hyperopt"
@@ -159,9 +182,13 @@ def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
             _set_progress("Running Freqtrade backtest", 55, "Simulating strategy trades")
             output = _run_command(backtest_command(config_path, class_name, strategy_path, result_path, data_path, timerange), workspace)
             run_type = "backtest"
+            optimization_report = None
         _raise_if_cancelled()
         _set_progress("Parsing backtest results", 90, "Reading Freqtrade result artifacts")
         result_payload = parse_backtest_directory(result_path)
+        if optimization_report:
+            optimization_report = reconcile_optimization_report(optimization_report, int(result_payload["metrics"].get("Total Trades", 0)), timerange)
+            payload["optimization_report"] = optimization_report.model_dump()
         _raise_if_cancelled()
         _set_progress("Saving SQLite snapshot", 96, "Persisting strategy and backtest results")
         connection = _database()
@@ -173,7 +200,7 @@ def _run_freqtrade_backtest(request: FreqtradeBacktestRequest) -> StrategyRun:
         finally:
             connection.close()
         _set_progress("Run complete", 100, "All results saved", 100)
-        return StrategyRun(strategy=snapshot, backtest=result, output=f"Market data update:\n{data_output}\n\nExecution:\n{output}")
+        return StrategyRun(strategy=snapshot, backtest=result, output=f"Market data update:\n{data_output}\n\nExecution:\n{output}", optimization_report=optimization_report)
     finally:
         _finish_progress()
 
@@ -184,9 +211,7 @@ def _run_freqtrade_validation(request: FreqtradeBacktestRequest) -> ValidationRu
         setup = request.strategy.model_copy(deep=True)
         payload = setup.freqtrade_payload
         payload["optimization_goal"] = request.optimization_goal.model_dump()
-        source, class_name = payload.get("strategy_source"), payload.get("class_name")
-        if not isinstance(source, str) or not isinstance(class_name, str):
-            raise ValueError("Create or load a Freqtrade template strategy first.")
+        source, class_name = _refresh_studio_template(setup)
         workspace = Path(setup.workspace_path).expanduser().resolve()
         pairs = [item.strip() for item in request.pairs.split(",") if item.strip()]
         timeframes = [item.strip() for item in request.timeframes.split(",") if item.strip()]
@@ -241,6 +266,25 @@ def _run_freqtrade_validation(request: FreqtradeBacktestRequest) -> ValidationRu
         _finish_progress()
 
 
+def _clear_freqtrade_results(request: FreqtradeDataClearRequest) -> dict[str, int]:
+    label = request.kind.rstrip("s").capitalize()
+    _start_progress(f"Preparing {label} cleanup")
+    try:
+        workspace = Path(request.workspace_path).expanduser().resolve()
+        _set_progress("Clearing SQLite history", 25, "Removing saved run records", 0)
+        _raise_if_cancelled()
+        def track_artifact(detail: str, percent: int) -> None:
+            _raise_if_cancelled()
+            _set_progress("Recycling Freqtrade artifacts", 70, detail, percent)
+
+        result = _with_database(lambda connection: clear_stored_freqtrade_results(connection, workspace, request.kind, track_artifact))
+        _set_progress("Refreshing workspace", 90, "Updating local result inventory", 100)
+        _set_progress("Cleanup complete", 100, "Selected data has been cleared", 100)
+        return result
+    finally:
+        _finish_progress()
+
+
 def _download_freqtrade_data(config_path: Path, workspace: Path, data_path: Path, exchange: str, trading_mode: str, pair_text: str, timeframe_text: str, timerange: str) -> str:
     pairs = [item.strip() for item in pair_text.split(",") if item.strip()]
     timeframes = [item.strip() for item in timeframe_text.split(",") if item.strip()]
@@ -287,7 +331,7 @@ async def list_freqtrade_exits() -> list[dict]:
 
 @commands.command()
 async def create_freqtrade_template(body: FreqtradeTemplateRequest) -> StrategySetup:
-    setup = await asyncio.to_thread(make_template_strategy, body.name, body.template_id, body.workspace_path, body.entry_id, body.exit_id)
+    setup = await asyncio.to_thread(make_template_strategy, body.name, body.template_id, body.workspace_path, body.entry_id, body.exit_id, body.trading_mode, body.pairs, body.timeframes)
     return await asyncio.to_thread(_with_database, lambda connection: save_strategy(connection, setup))
 
 
@@ -338,6 +382,16 @@ async def load_strategy_save_file(body: StrategyFileRequest) -> StrategyRun:
 @commands.command()
 async def list_imported_backtests() -> list[StoredBacktest]:
     return await asyncio.to_thread(_with_database, list_backtests)
+
+
+@commands.command()
+async def list_freqtrade_datasets(body: WorkspaceRequest) -> list[dict]:
+    return await asyncio.to_thread(list_downloaded_datasets, Path(body.workspace_path).expanduser())
+
+
+@commands.command()
+async def clear_freqtrade_results(body: FreqtradeDataClearRequest) -> dict[str, int]:
+    return await asyncio.to_thread(_clear_freqtrade_results, body)
 
 
 @commands.command()

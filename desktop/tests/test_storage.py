@@ -32,6 +32,11 @@ runner = load("freqtrade_runner")
 
 
 class FreqtradeStorageTests(unittest.TestCase):
+    def test_strategy_run_accepts_optional_optimization_report(self):
+        setup = models.StrategySetup(name="Test", template_id="fvg_atr")
+        report = models.OptimizationReport(target_trades_per_year=100, best_trade_count=20, best_annualized_trades=20, max_observed_trades=30, max_observed_annualized_trades=30, feasible_candidate_count=0, goal_met=False, summary="Goal not met")
+        self.assertFalse(models.StrategyRun(strategy=setup, output="", optimization_report=report).optimization_report.goal_met)
+
     def test_template_snapshot_exports_strategy_and_parameter_file(self):
         with tempfile.TemporaryDirectory() as directory:
             setup = templates.make_template_strategy("FVG ATR", "fvg_atr", directory)
@@ -52,6 +57,29 @@ class FreqtradeStorageTests(unittest.TestCase):
         result = runner.normalise_result({"strategy": {"FvgAtr": {"starting_balance": 100, "profit_total": 0.1, "profit_total_abs": 10, "total_trades": 1, "trades": [{"close_date": "2026-01-01", "profit_abs": 10}]}}})
         self.assertEqual(result["metrics"]["Return [%]"], 10.0)
         self.assertEqual(result["equity_curve"], [100.0, 110.0])
+
+    def test_clears_only_requested_result_class_and_keeps_candle_data(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(storage, "_move_to_recycle") as recycle:
+            workspace = Path(directory)
+            backtest_snapshot = workspace / "Test-backtest-1-01012026.sqlite3"
+            hyperopt_snapshot = workspace / "Test-hyperopt-1-01012026.sqlite3"
+            candle = workspace / "freqtrade" / "data" / "binance" / "BTC_USDT-5m-feather.feather"
+            backtest_snapshot.touch()
+            hyperopt_snapshot.touch()
+            candle.parent.mkdir(parents=True)
+            candle.write_bytes(b"candle")
+            results = workspace / "freqtrade" / "backtest_results"
+            results.mkdir(parents=True)
+            database = storage.open_database(workspace / "history.sqlite3")
+            storage.import_backtest(database, backtest_snapshot.name, {"metrics": {}, "trades": [], "equity_curve": []})
+            storage.import_backtest(database, hyperopt_snapshot.name, {"metrics": {}, "trades": [], "equity_curve": []})
+            cleared = storage.clear_freqtrade_results(database, workspace, "backtests")
+            self.assertEqual(cleared["history"], 1)
+            self.assertEqual(len(storage.list_backtests(database)), 1)
+            self.assertTrue(candle.is_file())
+            self.assertEqual(storage.list_downloaded_datasets(workspace)[0]["path"], "binance\\BTC_USDT-5m-feather.feather")
+            self.assertGreaterEqual(recycle.call_count, 2)
+            database.close()
 
     def test_builds_supported_freqtrade_cli_commands(self):
         command = runner.backtest_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("results"), Path("data"), "20260101-20260201")
@@ -74,6 +102,7 @@ class FreqtradeStorageTests(unittest.TestCase):
             self.assertEqual(loss_name, "StudioGoalHyperOptLoss")
             source = (loss_path / "StudioGoalHyperOptLoss.py").read_text(encoding="utf-8")
             self.assertIn("annualized_trades", source)
+            self.assertIn("if frequency_shortfall > 0", source)
             compile(source, "<goal-loss>", "exec")
         high_coverage, _ = runner.validation_stability_score([1.0, 1.1], [20, 20], 10)
         low_coverage, _ = runner.validation_stability_score([1.0, 1.1], [1, 1], 10)
@@ -95,6 +124,59 @@ class FreqtradeStorageTests(unittest.TestCase):
                     self.assertEqual(setup.freqtrade_payload["entry_id"], entry["id"])
                     self.assertEqual(setup.freqtrade_payload["exit_id"], exit_rule["id"])
                     compile(setup.freqtrade_payload["strategy_source"], "<strategy>", "exec")
+
+    def test_blank_template_name_uses_compact_strategy_context(self):
+        setup = templates.make_template_strategy("", "fvg_atr", ".", "fvg", "atr_trailing", "futures", "BTC/USDT:USDT,ETH/USDT:USDT", "5m,1h")
+        self.assertRegex(setup.name, r"^FVG-ATR-Futures-BTC-USDT-5m-\d{8}-\d{6}$")
+        self.assertTrue(all(item["file_label"] for item in templates.list_entries()))
+        self.assertTrue(all(item["file_label"] for item in templates.list_exits()))
+
+    def test_bakes_hyperopt_values_and_safe_stoploss_into_strategy_source(self):
+        source = templates.make_template_strategy("FVG", "fvg_atr", ".").freqtrade_payload["strategy_source"]
+        parameter_file = runner.normalize_parameter_file({"params": {"enter": {"enter_ema_period": 42}, "exit": {"exit_initial_stop_pct": 0.05}, "stoploss": {"stoploss": -0.15}}})
+        baked = runner.apply_parameter_file_to_source(source, parameter_file)
+        self.assertIn("stoploss = -0.25", baked)
+        self.assertIn("enter_ema_period = IntParameter(3, 250, default=42", baked)
+        self.assertIn("exit_initial_stop_pct = DecimalParameter(0.005, 0.15, default=0.05", baked)
+        self.assertEqual(runner.normalize_parameter_file({"params": {"exit": {"exit_initial_stop_pct": 0.19}}})["params"]["exit"]["exit_initial_stop_pct"], 0.15)
+
+    def test_reports_when_frequency_goal_is_not_feasible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory) / "user_data" / "hyperopt_results"
+            results.mkdir(parents=True)
+            records = [
+                {"current_epoch": 1, "is_best": True, "loss": 1, "results_metrics": {"total_trades": 12, "profit_total": 0.03, "profit_factor": 1.3, "max_drawdown_account": 0.02}},
+                {"current_epoch": 2, "loss": 2, "params_details": {"enter": {"enter_ema_period": 42}}, "params_not_optimized": {"stoploss": {"stoploss": -0.25}}, "results_metrics": {"total_trades": 30, "profit_total": -0.1, "profit_factor": 0.8, "max_drawdown_account": 0.03}},
+            ]
+            (results / "strategy_Test_1.fthypt").write_text("\n".join(__import__("json").dumps(record) for record in records), encoding="utf-8")
+            report, parameter_file = runner.read_hyperopt_report(Path(directory), "Test", "20250101-20260101", {"profile": "higher_frequency", "target_trades_per_year": 100, "max_drawdown_pct": 25, "min_profit_factor": 1.1})
+            self.assertFalse(report.goal_met)
+            self.assertEqual(report.max_observed_trades, 30)
+            self.assertEqual(report.best_trade_count, 30)
+            self.assertEqual(report.selection_status, "infeasible_closest_frequency")
+            self.assertEqual(parameter_file["strategy_name"], "Test")
+            self.assertEqual(parameter_file["params"]["enter"]["enter_ema_period"], 42)
+
+    def test_prefers_a_feasible_hyperopt_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results = Path(directory) / "user_data" / "hyperopt_results"
+            results.mkdir(parents=True)
+            records = [
+                {"current_epoch": 1, "loss": 3, "params_details": {"enter": {"enter_ema_period": 12}}, "results_metrics": {"total_trades": 120, "profit_total": 0.02, "profit_factor": 1.2, "max_drawdown_account": 0.02}},
+                {"current_epoch": 2, "loss": 1, "params_details": {"enter": {"enter_ema_period": 24}}, "results_metrics": {"total_trades": 130, "profit_total": 0.03, "profit_factor": 1.4, "max_drawdown_account": 0.02}},
+            ]
+            (results / "strategy_Test_1.fthypt").write_text("\n".join(__import__("json").dumps(record) for record in records), encoding="utf-8")
+            report, parameter_file = runner.read_hyperopt_report(Path(directory), "Test", "20250101-20260101", {"profile": "higher_frequency", "target_trades_per_year": 100, "max_drawdown_pct": 25, "min_profit_factor": 1.1})
+            self.assertTrue(report.goal_met)
+            self.assertEqual(report.selection_status, "feasible")
+            self.assertEqual(parameter_file["params"]["enter"]["enter_ema_period"], 24)
+
+    def test_rebacktest_trade_count_becomes_the_persisted_result(self):
+        report = models.OptimizationReport(target_trades_per_year=100, best_trade_count=6, best_annualized_trades=6, max_observed_trades=20, max_observed_annualized_trades=20, feasible_candidate_count=0, goal_met=False, summary="Infeasible")
+        reconciled = runner.reconcile_optimization_report(report, 7, "20251030-20261029")
+        self.assertEqual(reconciled.hyperopt_trade_count, 6)
+        self.assertEqual(reconciled.best_trade_count, 7)
+        self.assertIn("final re-backtest produced 7", reconciled.summary)
 
     def test_generates_safe_workspace_config_when_not_supplied(self):
         with tempfile.TemporaryDirectory() as directory:

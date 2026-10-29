@@ -43,10 +43,19 @@ class StrategyRun(BaseModel):
     backtest: StoredBacktest | None = None
     output: str
     error: str | None = None
+    optimization_report: "OptimizationReport | None" = None
 
 
 class StrategyFileRequest(BaseModel):
     path: str
+
+
+class WorkspaceRequest(BaseModel):
+    workspace_path: str = DEFAULT_WORKSPACE
+
+
+class FreqtradeDataClearRequest(WorkspaceRequest):
+    kind: str
 
 
 class FreqtradeTemplateRequest(BaseModel):
@@ -55,6 +64,9 @@ class FreqtradeTemplateRequest(BaseModel):
     workspace_path: str = DEFAULT_WORKSPACE
     entry_id: str = ""
     exit_id: str = ""
+    trading_mode: str = "futures"
+    pairs: str = ""
+    timeframes: str = ""
 
 
 class FreqtradeExportRequest(StrategyFileRequest):
@@ -67,6 +79,19 @@ class OptimizationGoal(BaseModel):
     min_trades_per_test: int = Field(default=10, ge=1, le=10000)
     max_drawdown_pct: float = Field(default=25, gt=0, le=100)
     min_profit_factor: float = Field(default=1.1, ge=0, le=100)
+
+
+class OptimizationReport(BaseModel):
+    target_trades_per_year: int
+    best_trade_count: int
+    best_annualized_trades: float
+    max_observed_trades: int
+    max_observed_annualized_trades: float
+    feasible_candidate_count: int
+    goal_met: bool
+    selection_status: str = "feasible"
+    hyperopt_trade_count: int | None = None
+    summary: str
 
 
 class FreqtradeBacktestRequest(BaseModel):

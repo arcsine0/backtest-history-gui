@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import subprocess
 import sys
 from queue import Empty, Queue
@@ -17,6 +18,8 @@ from datetime import datetime, timezone
 from zipfile import ZipFile
 from pathlib import Path
 from typing import Any, Callable
+
+from .models import OptimizationReport
 
 
 def download_data_command(exchange: str, trading_mode: str, pairs: list[str], timeframes: list[str], data_path: Path, timerange: str = "") -> list[str]:
@@ -133,7 +136,16 @@ class StudioGoalHyperOptLoss(IHyperOptLoss):
         frequency_shortfall = max(0.0, ({target} - annualized_trades) / {target})
         drawdown_excess = max(0.0, (drawdown - {max_drawdown}) / {max_drawdown})
         profit_factor_shortfall = max(0.0, {minimum_profit_factor} - profit_factor) if profit_factor != inf else 0.0
-        return ({frequency_weight} * frequency_shortfall ** 2) + ({drawdown_weight} * drawdown_excess * 2) + (profit_factor_shortfall * 2) + max(0.0, -total_profit) * 10 - ({return_weight} * total_profit)
+        # Frequency is the primary requirement for this profile; quality still ranks ties.
+        if "{profile}" == "higher_frequency":
+            quality_penalty = max(0.0, -total_profit) * 10 + ({drawdown_weight} * drawdown_excess * 10) + profit_factor_shortfall * 10
+            return frequency_shortfall * 1000 + quality_penalty - ({return_weight} * total_profit)
+        # Candidates that violate risk/profit guardrails never outrank a compliant one.
+        if total_profit <= 0 or drawdown_excess > 0 or profit_factor_shortfall > 0:
+            return 100 + max(0.0, -total_profit) * 10 + ({drawdown_weight} * drawdown_excess * 10) + profit_factor_shortfall * 10 + frequency_shortfall
+        if frequency_shortfall > 0:
+            return 10 + ({frequency_weight} * frequency_shortfall * 10) - ({return_weight} * total_profit)
+        return -({return_weight} * total_profit) + ({drawdown_weight} * drawdown_excess)
 ''', encoding="utf-8")
     return "StudioGoalHyperOptLoss", directory
 
@@ -302,6 +314,126 @@ def read_parameter_file(strategy_path: Path, strategy_name: str) -> dict[str, An
     except (OSError, ValueError):
         return {}
     return result if isinstance(result, dict) else {}
+
+
+def normalize_parameter_file(parameter_file: dict[str, Any]) -> dict[str, Any]:
+    """Keep exported hyperopt settings compatible with Studio's hard loss cap."""
+    normalized = json.loads(json.dumps(parameter_file)) if parameter_file else {}
+    params = normalized.setdefault("params", {})
+    if isinstance(params, dict):
+        stoploss = params.setdefault("stoploss", {})
+        if isinstance(stoploss, dict):
+            stoploss["stoploss"] = -0.25
+        for space in ("sell", "exit"):
+            selected = params.get(space)
+            if isinstance(selected, dict) and isinstance(selected.get("exit_initial_stop_pct"), (int, float)):
+                selected["exit_initial_stop_pct"] = min(0.15, max(0.005, float(selected["exit_initial_stop_pct"])))
+    return normalized
+
+
+def apply_parameter_file_to_source(source: str, parameter_file: dict[str, Any]) -> str:
+    """Bake the selected Hyperopt values into the strategy source used for verification."""
+    params = parameter_file.get("params", {}) if isinstance(parameter_file, dict) else {}
+    values: dict[str, Any] = {}
+    if isinstance(params, dict):
+        for space in ("buy", "sell", "enter", "exit"):
+            selected = params.get(space)
+            if isinstance(selected, dict):
+                values.update(selected)
+        stoploss = params.get("stoploss")
+        if isinstance(stoploss, dict) and isinstance(stoploss.get("stoploss"), (int, float)):
+            source = re.sub(r"(?m)^    stoploss\s*=\s*[-\d.]+", f"    stoploss = {stoploss['stoploss']!r}", source)
+    for name, value in values.items():
+        pattern = rf"(?m)^(    {re.escape(name)}\s*=\s*(?:IntParameter|DecimalParameter)\([^\n]*?default=)[^,\)]+"
+        source = re.sub(pattern, lambda match: f"{match.group(1)}{value!r}", source)
+    return source
+
+
+def hyperopt_result_names(workspace: Path, strategy_name: str) -> set[str]:
+    directory = workspace / "user_data" / "hyperopt_results"
+    return {path.name for path in directory.glob(f"strategy_{strategy_name}_*.fthypt")} if directory.is_dir() else set()
+
+
+def _timerange_years(timerange: str) -> float:
+    try:
+        start, end = (datetime.strptime(value[:8], "%Y%m%d") for value in timerange.split("-", maxsplit=1))
+        return max((end - start).total_seconds() / 31_557_600, 1 / 365)
+    except ValueError:
+        return 1.0
+
+
+def read_hyperopt_report(workspace: Path, strategy_name: str, timerange: str, goal: dict[str, Any], existing_names: set[str] | None = None) -> tuple[OptimizationReport, dict[str, Any]]:
+    """Describe whether the evaluated search space could meet the requested goal."""
+    directory = workspace / "user_data" / "hyperopt_results"
+    candidates = [path for path in directory.glob(f"strategy_{strategy_name}_*.fthypt") if not existing_names or path.name not in existing_names]
+    if not candidates:
+        raise ValueError("Freqtrade completed without a new Hyperopt results artifact.")
+    records: list[dict[str, Any]] = []
+    for line in max(candidates, key=lambda path: path.stat().st_mtime).read_text(encoding="utf-8").splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("results_metrics"), dict):
+            records.append(value)
+    if not records:
+        raise ValueError("Freqtrade Hyperopt did not record evaluated configurations.")
+    years = _timerange_years(timerange)
+    target = int(goal.get("target_trades_per_year", 100))
+    max_drawdown = float(goal.get("max_drawdown_pct", 25)) / 100
+    minimum_pf = float(goal.get("min_profit_factor", 1.1))
+    profile = str(goal.get("profile", "balanced"))
+    def metrics(record: dict[str, Any]) -> dict[str, Any]:
+        return record["results_metrics"]
+    def trade_count(record: dict[str, Any]) -> int:
+        return int(metrics(record).get("total_trades") or 0)
+    def compliant(record: dict[str, Any]) -> bool:
+        value = metrics(record)
+        return (trade_count(record) / years >= target and float(value.get("profit_total") or 0) > 0 and float(value.get("max_drawdown_account") or 0) <= max_drawdown and float(value.get("profit_factor") or 0) >= minimum_pf)
+
+    def quality_penalty(record: dict[str, Any]) -> float:
+        value = metrics(record)
+        return (
+            max(0.0, -float(value.get("profit_total") or 0)) * 10
+            + max(0.0, float(value.get("max_drawdown_account") or 0) - max_drawdown) / max_drawdown * 10
+            + max(0.0, minimum_pf - float(value.get("profit_factor") or 0)) * 10
+        )
+
+    max_record = max(records, key=trade_count)
+    feasible = [record for record in records if compliant(record)]
+    if feasible:
+        selected = min(feasible, key=lambda record: float(record.get("loss") or float("inf")))
+        selection_status = "feasible"
+    elif profile == "higher_frequency":
+        # No candidate met every requirement: choose the closest frequency fit, then the least broken guardrails.
+        selected = min(records, key=lambda record: (max(0.0, target - trade_count(record) / years), quality_penalty(record), float(record.get("loss") or float("inf"))))
+        selection_status = "infeasible_closest_frequency"
+    else:
+        selected = min(records, key=lambda record: (quality_penalty(record), float(record.get("loss") or float("inf"))))
+        selection_status = "infeasible_best_fit"
+    selected_count, maximum_count = trade_count(selected), trade_count(max_record)
+    goal_met = bool(feasible)
+    summary = (
+        f"Goal met by {len(feasible)} of {len(records)} evaluated configurations."
+        if goal_met
+        else f"Infeasible: no candidate met every goal. Saved the closest {('frequency' if profile == 'higher_frequency' else 'overall')} fit from {len(records)} evaluated configurations."
+    )
+    params = dict(selected.get("params_not_optimized") or {})
+    params.update(selected.get("params_details") or {})
+    parameter_file = {"strategy_name": strategy_name, "params": params, "ft_stratparam_v": 1}
+    report = OptimizationReport(target_trades_per_year=target, best_trade_count=selected_count, best_annualized_trades=round(selected_count / years, 1), max_observed_trades=maximum_count, max_observed_annualized_trades=round(maximum_count / years, 1), feasible_candidate_count=len(feasible), goal_met=goal_met, selection_status=selection_status, summary=summary)
+    return report, parameter_file
+
+
+def reconcile_optimization_report(report: OptimizationReport, rebacktest_trade_count: int, timerange: str) -> OptimizationReport:
+    """Keep the persisted report aligned with the final backtest, which is authoritative."""
+    if report.best_trade_count == rebacktest_trade_count:
+        return report
+    report.hyperopt_trade_count = report.best_trade_count
+    report.best_trade_count = rebacktest_trade_count
+    report.best_annualized_trades = round(rebacktest_trade_count / _timerange_years(timerange), 1)
+    report.summary += f" Hyperopt evaluated {report.hyperopt_trade_count} trades; the final re-backtest produced {rebacktest_trade_count} trades with the exported parameters."
+    return report
 
 
 def _read_json(path: Path) -> dict[str, Any]:

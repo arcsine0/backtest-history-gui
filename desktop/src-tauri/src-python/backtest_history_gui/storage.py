@@ -1,11 +1,14 @@
 """SQLite storage for Freqtrade strategies and normalized result history."""
 
 import json
+import os
 import re
+import shutil
 import sqlite3
+import ctypes
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .models import DEFAULT_WORKSPACE, PROJECT_ROOT, StoredBacktest, StrategySetup
 
@@ -132,6 +135,60 @@ def load_backtest(connection: sqlite3.Connection, backtest_id: int) -> StoredBac
         raise ValueError("Backtest not found.")
     metrics, trades, equity, timestamps = _normalise(json.loads(row["payload_json"]))
     return StoredBacktest(id=row["id"], name=row["name"], imported_at=row["imported_at"], metrics=metrics, trades=trades, equity_curve=equity, equity_timestamps=timestamps)
+
+
+def list_downloaded_datasets(workspace: Path) -> list[dict[str, Any]]:
+    """List cached Freqtrade candles without inspecting their contents."""
+    data_path = workspace.resolve() / "freqtrade" / "data"
+    if not data_path.is_dir():
+        return []
+    datasets = [path for path in data_path.rglob("*") if path.is_file() and path.suffix.lower() in {".feather", ".json", ".gz", ".parquet"}]
+    return [{"path": str(path.relative_to(data_path)), "bytes": path.stat().st_size} for path in sorted(datasets)]
+
+
+def clear_freqtrade_results(connection: sqlite3.Connection, workspace: Path, kind: str, on_artifact: Callable[[str, int], None] | None = None) -> dict[str, int]:
+    """Clear one result class; downloaded market candles deliberately remain untouched."""
+    targets = {
+        "backtests": ("-backtest-", [workspace / "freqtrade" / "backtest_results"]),
+        "hyperopts": ("-hyperopt-", [workspace / "user_data" / "hyperopt_results", workspace / "user_data" / "hyperopts" / "StudioGoalHyperOptLoss.py"]),
+        "validations": ("-validation-", [workspace / "freqtrade" / "validation_results"]),
+    }
+    if kind not in targets:
+        raise ValueError("Clear kind must be backtests, hyperopts, or validations.")
+    marker, artifact_paths = targets[kind]
+    root = workspace.resolve()
+    snapshots = [path for path in root.glob(f"*{marker}*.sqlite3") if path.is_file()]
+    rows = connection.execute("SELECT name FROM imported_backtests WHERE name LIKE ?", (f"%{marker}%",)).fetchall()
+    connection.execute("DELETE FROM imported_backtests WHERE name LIKE ?", (f"%{marker}%",))
+    if kind == "validations":
+        connection.execute("DELETE FROM validation_runs WHERE name LIKE ?", (f"%{marker}%",))
+    connection.commit()
+    moved = 0
+    paths = [*snapshots, *artifact_paths]
+    for index, path in enumerate(paths, start=1):
+        if path.exists():
+            if on_artifact:
+                on_artifact(f"Moving {path.name} to the Recycle Bin", round(index * 100 / len(paths)))
+            _move_to_recycle(path)
+            moved += 1
+    return {"history": len(rows), "files": moved}
+
+
+def _move_to_recycle(path: Path) -> None:
+    """Use the Windows Recycle Bin so clearing local artifacts is recoverable."""
+    if os.name != "nt":
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        return
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", ctypes.c_void_p), ("wFunc", ctypes.c_uint), ("pFrom", ctypes.c_wchar_p), ("pTo", ctypes.c_wchar_p), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", ctypes.c_bool), ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", ctypes.c_wchar_p)]
+
+    operation = SHFILEOPSTRUCTW(None, 3, f"{path}\0\0", None, 0x40 | 0x10 | 0x4 | 0x400, False, None, None)
+    if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation)) or operation.fAnyOperationsAborted:
+        raise OSError(f"Could not move {path} to the Recycle Bin.")
 
 
 def _normalise(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[float], list[str]]:

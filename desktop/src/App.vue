@@ -7,12 +7,15 @@ import EquityChart from "./components/EquityChart.vue";
 type Parameter = { name: string; value: string; notes: string; enabled: boolean; locked: boolean };
 type Strategy = { id?: number; name: string; source: string; workspace_path: string; template_id: string; parameters: Parameter[]; freqtrade_payload?: Record<string, unknown>; strategy_file?: string | null };
 type Backtest = { id: number; name: string; imported_at: string; metrics: Record<string, unknown>; trades: Record<string, unknown>[]; equity_curve: number[]; equity_timestamps: string[] };
-type StrategyRun = { strategy: Strategy; backtest: Backtest | null; output: string; error?: string | null };
+type OptimizationReport = { target_trades_per_year: number; best_trade_count: number; best_annualized_trades: number; max_observed_trades: number; max_observed_annualized_trades: number; feasible_candidate_count: number; goal_met: boolean; selection_status: string; summary: string };
+type StrategyRun = { strategy: Strategy; backtest: Backtest | null; output: string; error?: string | null; optimization_report?: OptimizationReport | null };
 type ValidationSlice = { label: string; timerange: string; backtest: Backtest };
 type OptimizationGoal = { profile: "balanced" | "higher_frequency" | "return_focused" | "capital_preservation"; target_trades_per_year: number; min_trades_per_test: number; max_drawdown_pct: number; min_profit_factor: number };
 type ValidationRun = { training: ValidationSlice; tests: ValidationSlice[]; stability_score: number; mean_return: number; return_stddev: number; total_test_trades: number; minimum_test_trades: number; coverage: string; output: string; snapshot_path?: string | null };
+type Dataset = { path: string; bytes: number };
+type ClearKind = "backtests" | "hyperopts" | "validations";
 type Template = { id: string; label: string; entry_id: string; exit_id: string };
-type StrategyComponent = { id: string; label: string; description: string };
+type StrategyComponent = { id: string; label: string; file_label: string; description: string };
 type SortDirection = "asc" | "desc" | null;
 
 const strategy = ref<Strategy>({ name: "", source: "", workspace_path: "", template_id: "fvg_atr", parameters: [] });
@@ -22,6 +25,7 @@ const exits = ref<StrategyComponent[]>([]);
 const entryId = ref("fvg");
 const exitId = ref("atr_trailing");
 const history = ref<Backtest[]>([]);
+const datasets = ref<Dataset[]>([]);
 const selected = ref<Backtest | null>(null);
 const configPath = ref("");
 function calendarTimerange(years: number) {
@@ -43,6 +47,7 @@ const validationTimerange = ref(calendarTimerange(5));
 const quickValidationTimerange = ref(calendarTimerangeMonths(30));
 const epochs = ref(100);
 const optimizationGoal = ref<OptimizationGoal>({ profile: "balanced", target_trades_per_year: 100, min_trades_per_test: 10, max_drawdown_pct: 25, min_profit_factor: 1.1 });
+const optimizationReport = ref<OptimizationReport | null>(null);
 const exchange = ref("binance");
 const tradingMode = ref("futures");
 const pairs = ref("BTC/USDT:USDT");
@@ -50,7 +55,9 @@ const timeframes = ref("5m");
 const output = ref("");
 const error = ref("");
 const busy = ref(false);
-const activeTab = ref<"builder" | "optimizer" | "validation">("builder");
+const activeTab = ref<"builder" | "optimizer" | "validation" | "settings">("builder");
+const clearingKind = ref("");
+const pendingClearKind = ref<ClearKind | null>(null);
 const validation = ref<ValidationRun | null>(null);
 type Progress = { active: boolean; label: string; percent: number; sub_label: string; sub_percent: number; steps: string[] };
 const progress = ref<Progress | null>(null);
@@ -59,6 +66,24 @@ const sortColumn = ref<string | null>(null);
 const sortDirection = ref<SortDirection>(null);
 const page = ref(1);
 const perPage = 25;
+const nameClock = ref(Date.now());
+let nameClockTimer: number | undefined;
+
+function generatedName(now = new Date()) {
+  const entry = entries.value.find((item) => item.id === entryId.value)?.file_label || "Entry";
+  const exit = exits.value.find((item) => item.id === exitId.value)?.file_label || "Exit";
+  const pair = (pairs.value.split(",").find((item) => item.trim()) || "market").trim().split(":", 1)[0].replace("/", "-");
+  const timeframe = (timeframes.value.split(",").find((item) => item.trim()) || "timeframe").trim();
+  const market = ({ futures: "Futures", margin: "Margin", spot: "Spot" } as Record<string, string>)[tradingMode.value] || "Market";
+  const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+  const time = `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+  return `${entry}-${exit}-${market}-${pair}-${timeframe}-${date}-${time}`;
+}
+
+const generatedNamePreview = computed(() => {
+  nameClock.value;
+  return generatedName();
+});
 
 async function call<T>(command: string, body?: unknown) {
   error.value = "";
@@ -101,6 +126,35 @@ async function refresh() {
   entries.value = savedEntries;
   exits.value = savedExits;
   history.value = savedHistory;
+  datasets.value = await call<Dataset[]>("list_freqtrade_datasets", { workspace_path: strategy.value.workspace_path });
+}
+
+async function refreshDatasets() {
+  datasets.value = await call<Dataset[]>("list_freqtrade_datasets", { workspace_path: strategy.value.workspace_path });
+}
+
+function requestClear(kind: ClearKind) {
+  pendingClearKind.value = kind;
+}
+
+async function clearResults() {
+  const kind = pendingClearKind.value;
+  if (!kind) return;
+  pendingClearKind.value = null;
+  clearingKind.value = kind;
+  startProgress(`Preparing ${kind} cleanup`);
+  try {
+    const result = await call<{ history: number; files: number }>("clear_freqtrade_results", { workspace_path: strategy.value.workspace_path, kind });
+    output.value = `Cleared ${kind}: ${result.history} history record(s) and ${result.files} local artifact(s) moved to the Recycle Bin.`;
+    selected.value = null;
+    validation.value = null;
+    await refresh();
+  } catch (cause) { error.value = String(cause); } finally { clearingKind.value = ""; stopProgress(); }
+}
+
+function openSettings() {
+  activeTab.value = "settings";
+  refreshDatasets().catch((cause) => error.value = String(cause));
 }
 
 function applyPreset() {
@@ -117,7 +171,8 @@ function syncPreset() {
 async function createTemplate() {
   busy.value = true;
   try {
-    strategy.value = await call<Strategy>("create_freqtrade_template", { name: strategy.value.name || templates.value.find((item) => item.id === strategy.value.template_id)?.label || "Freqtrade strategy", template_id: strategy.value.template_id, entry_id: entryId.value, exit_id: exitId.value, workspace_path: strategy.value.workspace_path });
+    nameClock.value = Date.now();
+    strategy.value = await call<Strategy>("create_freqtrade_template", { name: strategy.value.name.trim() || generatedNamePreview.value, template_id: strategy.value.template_id, entry_id: entryId.value, exit_id: exitId.value, workspace_path: strategy.value.workspace_path, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value });
     output.value = "Template created. Its parameter schema is deterministic and ready for Freqtrade hyperopt.";
   } catch (cause) { error.value = String(cause); } finally { busy.value = false; }
 }
@@ -129,6 +184,10 @@ async function chooseConfig() {
 
 function serializableStrategy() {
   return JSON.parse(JSON.stringify(strategy.value)) as Strategy;
+}
+
+function serializableGoal(): OptimizationGoal {
+  return { ...optimizationGoal.value };
 }
 
 function hydrateGoal(next: unknown) {
@@ -144,11 +203,12 @@ async function run(hyperopt = false) {
   busy.value = true;
   startProgress(hyperopt ? "Starting optimization" : "Starting backtest");
   try {
-    const run = await call<StrategyRun>("run_freqtrade_backtest", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: timerange.value, hyperopt_epochs: hyperopt ? epochs.value : 0, optimization_goal: optimizationGoal.value });
+    const run = await call<StrategyRun>("run_freqtrade_backtest", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: timerange.value, hyperopt_epochs: hyperopt ? epochs.value : 0, optimization_goal: serializableGoal() });
     strategy.value = run.strategy;
     entryId.value = String(run.strategy.freqtrade_payload?.entry_id || entryId.value);
     exitId.value = String(run.strategy.freqtrade_payload?.exit_id || exitId.value);
     hydrateGoal(run.strategy.freqtrade_payload?.optimization_goal);
+    optimizationReport.value = run.optimization_report || (run.strategy.freqtrade_payload?.optimization_report as OptimizationReport | undefined) || null;
     output.value = run.output;
     if (run.error) error.value = run.error;
     if (run.backtest) selected.value = run.backtest;
@@ -160,7 +220,7 @@ async function runValidation(quick = false) {
   busy.value = true;
   startProgress(quick ? "Starting quick validation" : "Starting walk-forward validation");
   try {
-    validation.value = await call<ValidationRun>("run_freqtrade_validation", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: quick ? quickValidationTimerange.value : validationTimerange.value, validation_test_count: quick ? 5 : 10, optimization_goal: optimizationGoal.value });
+    validation.value = await call<ValidationRun>("run_freqtrade_validation", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: quick ? quickValidationTimerange.value : validationTimerange.value, validation_test_count: quick ? 5 : 10, optimization_goal: serializableGoal() });
     selected.value = validation.value.training.backtest;
     output.value = validation.value.output;
   } catch (cause) { error.value = String(cause); } finally { busy.value = false; stopProgress(); }
@@ -175,6 +235,7 @@ async function chooseSnapshot() {
     entryId.value = String(run.strategy.freqtrade_payload?.entry_id || entryId.value);
     exitId.value = String(run.strategy.freqtrade_payload?.exit_id || exitId.value);
     hydrateGoal(run.strategy.freqtrade_payload?.optimization_goal);
+    optimizationReport.value = (run.strategy.freqtrade_payload?.optimization_report as OptimizationReport | undefined) || null;
     selected.value = run.backtest;
     output.value = run.output;
   } catch (cause) { error.value = String(cause); }
@@ -218,8 +279,14 @@ function tableValue(column: string, value: unknown) {
   if (column.toLowerCase() === "is_short" && typeof value === "boolean") return value ? "Short" : "Long";
   return metricValue(value);
 }
-onMounted(() => refresh().catch((cause) => error.value = String(cause)));
-onBeforeUnmount(stopProgress);
+onMounted(() => {
+  nameClockTimer = window.setInterval(() => nameClock.value = Date.now(), 1000);
+  refresh().catch((cause) => error.value = String(cause));
+});
+onBeforeUnmount(() => {
+  stopProgress();
+  if (nameClockTimer !== undefined) window.clearInterval(nameClockTimer);
+});
 </script>
 
 <template>
@@ -231,10 +298,11 @@ onBeforeUnmount(stopProgress);
         <button role="tab" class="tab gap-2" :class="activeTab === 'builder' ? 'tab-active' : ''" :aria-selected="activeTab === 'builder'" @click="activeTab = 'builder'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 20h16M6 16l4-4 3 3 5-7" /></svg>Builder</button>
         <button role="tab" class="tab gap-2" :class="activeTab === 'optimizer' ? 'tab-active' : ''" :aria-selected="activeTab === 'optimizer'" @click="activeTab = 'optimizer'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 6h16M4 12h10M4 18h6" /><circle cx="17" cy="12" r="2" /><circle cx="13" cy="18" r="2" /></svg>Optimizer</button>
         <button role="tab" class="tab gap-2" :class="activeTab === 'validation' ? 'tab-active' : ''" :aria-selected="activeTab === 'validation'" @click="activeTab = 'validation'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M12 3v18M3 12h18" /><path d="m7 16 3-3 2 2 5-6" /></svg>Validation</button>
+        <button role="tab" class="tab gap-2" :class="activeTab === 'settings' ? 'tab-active' : ''" :aria-selected="activeTab === 'settings'" @click="openSettings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.1 2.1-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.09A1.7 1.7 0 0 0 10.68 18.35a1.7 1.7 0 0 0-1.88.34l-.06.06-2.1-2.1.06-.06A1.7 1.7 0 0 0 7.04 14.7 1.7 1.7 0 0 0 5.48 13.66H5.4v-3h.08a1.7 1.7 0 0 0 1.56-1.04A1.7 1.7 0 0 0 6.7 7.74l-.06-.06 2.1-2.1.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 11.72 4.42v-.08h3v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.1 2.1-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.08v3h-.08A1.7 1.7 0 0 0 19.4 15Z" /></svg>Settings</button>
       </div>
       <section v-if="activeTab === 'builder'" class="card bg-base-200"><div class="card-body"><h2 class="card-title">Strategy builder</h2>
         <div class="grid gap-3 md:grid-cols-2">
-          <fieldset class="fieldset"><legend class="fieldset-legend">Name</legend><input v-model="strategy.name" class="input w-full" placeholder="FVG ATR BTC 5m" /></fieldset>
+          <fieldset class="fieldset"><legend class="fieldset-legend">Name</legend><input v-model="strategy.name" class="input w-full" :placeholder="generatedNamePreview" /></fieldset>
           <fieldset class="fieldset"><legend class="fieldset-legend">Workspace</legend><input v-model="strategy.workspace_path" class="input w-full" /><p class="label">SQLite snapshots and generated strategy files stay here.</p></fieldset>
           <fieldset class="fieldset"><legend class="fieldset-legend">Preset pairing</legend><select v-model="strategy.template_id" class="select w-full" @change="applyPreset"><option value="custom">Custom selection</option><option v-for="item in templates" :key="item.id" :value="item.id">{{ item.label }}</option></select></fieldset>
           <fieldset class="fieldset"><legend class="fieldset-legend">Freqtrade config (optional)</legend><div class="join w-full"><input v-model="configPath" class="input join-item w-full" placeholder="config.json" /><button class="btn join-item" @click="chooseConfig">Choose</button></div><p class="label">An empty field creates a safe local dry-run config.</p></fieldset>
@@ -243,7 +311,7 @@ onBeforeUnmount(stopProgress);
           <fieldset class="fieldset md:col-span-2"><legend class="fieldset-legend">Logic brief — retained for a future AI layer</legend><textarea v-model="strategy.source" class="textarea h-24 w-full" placeholder="This does not alter the deterministic template or its parameters yet." /></fieldset>
         </div>
         <div class="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-5"><fieldset class="fieldset"><legend class="fieldset-legend">Exchange</legend><input v-model="exchange" class="input w-full" placeholder="binance" /></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Market type</legend><select v-model="tradingMode" class="select w-full"><option value="futures">Futures</option><option value="spot">Spot</option><option value="margin">Margin</option></select></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Pairs</legend><input v-model="pairs" class="input w-full" placeholder="BTC/USDT:USDT" /><p class="label">Comma-separated.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Timeframes</legend><input v-model="timeframes" class="input w-full" placeholder="5m,1h" /><p class="label">Comma-separated.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Timerange</legend><input v-model="timerange" class="input w-full" placeholder="20260101-20261231" /></fieldset></div>
-        <div class="mt-3 flex flex-wrap items-end gap-3"><button class="btn btn-secondary" :disabled="busy || !strategy.name" @click="createTemplate">Create</button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run()"><span>Run Backtest</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
+        <div class="mt-3 flex flex-wrap items-end gap-3"><button class="btn btn-secondary" :disabled="busy" @click="createTemplate">Create</button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run()"><span>Run Backtest</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
         <div v-if="strategy.parameters.length" class="mt-4"><h3 class="font-medium">Template parameters</h3><div class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"><div v-for="parameter in strategy.parameters" :key="parameter.name" class="rounded-box border border-base-300 p-3"><div class="font-medium">{{ parameter.name }}</div><div class="text-sm text-base-content/70">{{ parameter.value }} · {{ parameter.notes }}</div></div></div></div>
         <div class="mt-4 flex flex-wrap gap-2"><button class="btn btn-sm" @click="chooseSnapshot">Load</button><button class="btn btn-sm" :disabled="!strategy.strategy_file" @click="exportStrategy">Export</button></div>
       </div></section>
@@ -251,20 +319,35 @@ onBeforeUnmount(stopProgress);
         <div class="mt-3 grid gap-3 md:grid-cols-2"><fieldset class="fieldset"><legend class="fieldset-legend">Hyperopt epochs</legend><input v-model.number="epochs" type="number" min="1" max="10000" class="input w-full" /><p class="label">Higher values explore more parameter combinations.</p></fieldset><div class="rounded-box border border-base-300 p-4"><div class="text-sm text-base-content/60">Current run context</div><div class="mt-1 font-medium">{{ strategy.name || 'Create a template in Builder' }}</div><div class="mt-1 text-sm text-base-content/70">{{ exchange }} · {{ tradingMode }} · {{ pairs }} · {{ timeframes }}<span v-if="timerange"> · {{ timerange }}</span></div></div></div>
         <div class="mt-4 grid gap-3 md:grid-cols-2"><fieldset class="fieldset"><legend class="fieldset-legend">Optimization goal</legend><select v-model="optimizationGoal.profile" class="select w-full"><option value="balanced">Balanced</option><option value="higher_frequency">Higher frequency</option><option value="return_focused">Return focused</option><option value="capital_preservation">Capital preservation</option></select><p class="label">Generates the Freqtrade loss objective; it does not invent new logic.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Target trades / year</legend><input v-model.number="optimizationGoal.target_trades_per_year" type="number" min="1" max="100000" class="input w-full" /><p class="label">A target, not a reason to accept losing churn.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Minimum trades / validation test</legend><input v-model.number="optimizationGoal.min_trades_per_test" type="number" min="1" max="10000" class="input w-full" /><p class="label">Low-sample tests reduce the stability score.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Maximum drawdown [%]</legend><input v-model.number="optimizationGoal.max_drawdown_pct" type="number" min="0.1" max="100" step="0.1" class="input w-full" /></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Minimum profit factor</legend><input v-model.number="optimizationGoal.min_profit_factor" type="number" min="0" max="100" step="0.1" class="input w-full" /></fieldset></div>
         <div class="mt-3"><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run(true)"><span>Optimize</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
+        <div v-if="optimizationReport" class="mt-4 rounded-box border border-base-300 bg-base-100 p-4"><div class="flex flex-wrap items-center justify-between gap-2"><h3 class="font-medium">Optimization feasibility</h3><span class="badge" :class="optimizationReport.goal_met ? 'badge-success' : 'badge-warning'">{{ optimizationReport.goal_met ? 'Goal met' : 'Infeasible fallback' }}</span></div><div v-if="!optimizationReport.goal_met" role="alert" class="alert alert-warning alert-soft mt-3 text-sm"><span>This snapshot uses the best available fallback, not a strategy that met every goal.</span></div><p class="mt-2 text-sm text-base-content/70">{{ optimizationReport.summary }}</p><div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div><div class="text-xs text-base-content/60">Target trades / year</div><div class="font-medium">{{ metricValue(optimizationReport.target_trades_per_year) }}</div></div><div><div class="text-xs text-base-content/60">Selected trades / year</div><div class="font-medium">{{ metricValue(optimizationReport.best_annualized_trades) }}</div></div><div><div class="text-xs text-base-content/60">Search maximum / year</div><div class="font-medium">{{ metricValue(optimizationReport.max_observed_annualized_trades) }}</div></div><div><div class="text-xs text-base-content/60">Compliant candidates</div><div class="font-medium">{{ metricValue(optimizationReport.feasible_candidate_count) }}</div></div></div></div>
         <div v-if="strategy.parameters.length" class="mt-5"><h3 class="font-medium">Optimizable parameters</h3><div class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"><div v-for="parameter in strategy.parameters" :key="parameter.name" class="rounded-box border border-base-300 p-3"><div class="font-medium">{{ parameter.name }}</div><div class="text-sm text-base-content/70">{{ parameter.value }} · {{ parameter.notes }}</div></div></div></div>
       </div></section>
-      <section v-else class="card bg-base-200"><div class="card-body"><h2 class="card-title">Walk-forward validation</h2><p class="text-sm text-base-content/70">Standard validation uses 70% chronological training and 10 equal out-of-sample test windows. Quick validation uses 2.5 years and 5 test windows. The score is <span class="font-medium">100 ÷ (1 + σ test return)</span>, and becomes zero when mean test return is not positive.</p>
+      <section v-else-if="activeTab === 'validation'" class="card bg-base-200"><div class="card-body"><h2 class="card-title">Walk-forward validation</h2><p class="text-sm text-base-content/70">Standard validation uses 70% chronological training and 10 equal out-of-sample test windows. Quick validation uses 2.5 years and 5 test windows. The score is <span class="font-medium">100 ÷ (1 + σ test return)</span>, and becomes zero when mean test return is not positive.</p>
         <div class="mt-3 flex flex-wrap gap-3"><fieldset class="fieldset min-w-0 w-full md:w-72"><legend class="fieldset-legend">Validation range</legend><input v-model="validationTimerange" class="input min-w-0 w-full" placeholder="20210101-20260101" /><p class="label">Standard: five years and 10 test windows.</p></fieldset><fieldset class="fieldset min-w-0 w-full md:w-80"><legend class="fieldset-legend">Quick validation</legend><input :value="quickValidationTimerange" readonly class="input min-w-0 w-full" /><p class="label">2.5 years and 5 test windows. Reuses local candles when coverage is available.</p></fieldset></div><div class="mt-3 flex flex-wrap gap-3"><button class="btn" :disabled="busy || !strategy.parameters.length" @click="runValidation(true)"><span>Quick Validate</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="runValidation()"><span>Validate</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
         <template v-if="validation"><div class="mt-5 grid gap-3 sm:grid-cols-3"><div class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">Stability score</div><div class="mt-1 text-2xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.stability_score) }}</div><div class="text-xs text-base-content/60">Higher is more stable.</div></div><div class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">Mean test return [%]</div><div class="mt-1 text-xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.mean_return) }}</div></div><div class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">Test return σ</div><div class="mt-1 text-xl font-medium" :class="valueTone('Drawdown [%]', -validation.return_stddev)">{{ metricValue(validation.return_stddev) }}</div><div class="text-xs text-base-content/60">{{ validation.coverage }}</div></div></div>
           <div class="mt-5 max-h-96 overflow-auto rounded-box border border-base-300"><table class="table table-pin-rows table-sm"><thead><tr><th>Split</th><th>Timerange</th><th>Return [%]</th><th>Win Rate [%]</th><th>Profit Factor</th><th></th></tr></thead><tbody><tr v-for="slice in [validation.training, ...validation.tests]" :key="slice.label"><td>{{ slice.label }}</td><td>{{ slice.timerange }}</td><td :class="valueTone('Return [%]', slice.backtest.metrics['Return [%]'])">{{ metricValue(slice.backtest.metrics['Return [%]']) }}</td><td :class="valueTone('Win Rate [%]', slice.backtest.metrics['Win Rate [%]'])">{{ metricValue(slice.backtest.metrics['Win Rate [%]']) }}</td><td :class="valueTone('Profit Factor', slice.backtest.metrics['Profit Factor'])">{{ metricValue(slice.backtest.metrics['Profit Factor']) }}</td><td><button class="btn btn-ghost btn-xs" @click="selectHistory(slice.backtest)">View</button></td></tr></tbody></table></div></template>
         <div v-if="validation" class="mt-5 rounded-box border border-base-300 p-4"><h3 class="font-medium">Validation confidence</h3><div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Sample-adjusted stability</div><div class="mt-1 text-xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.stability_score) }}</div></div><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Out-of-sample trades</div><div class="mt-1 text-xl font-medium">{{ validation.total_test_trades }}</div><div class="text-xs text-base-content/60">Minimum {{ validation.minimum_test_trades }} per test.</div></div><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Mean test return [%]</div><div class="mt-1 text-xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.mean_return) }}</div></div><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Test return deviation</div><div class="mt-1 text-xl font-medium">{{ metricValue(validation.return_stddev) }}</div></div></div><p v-if="validation.snapshot_path" class="mt-3 text-sm text-base-content/70">Saved validation snapshot: {{ validation.snapshot_path }}</p><div class="mt-3 max-h-80 overflow-auto rounded-box border border-base-300"><table class="table table-pin-rows table-sm"><thead><tr><th>Split</th><th>Trades</th><th>Return [%]</th><th>Profit Factor</th></tr></thead><tbody><tr v-for="slice in [validation.training, ...validation.tests]" :key="`confidence-${slice.label}`"><td>{{ slice.label }}</td><td>{{ metricValue(slice.backtest.metrics['Total Trades']) }}</td><td :class="valueTone('Return [%]', slice.backtest.metrics['Return [%]'])">{{ metricValue(slice.backtest.metrics['Return [%]']) }}</td><td :class="valueTone('Profit Factor', slice.backtest.metrics['Profit Factor'])">{{ metricValue(slice.backtest.metrics['Profit Factor']) }}</td></tr></tbody></table></div></div>
       </div></section>
+      <section v-else class="card bg-base-200"><div class="card-body"><h2 class="card-title">Settings</h2>
+        <div class="mt-3 rounded-box border border-error/50 bg-error/5 p-4"><h3 class="font-medium text-error">Danger zone</h3><p class="mt-1 text-sm text-base-content/70">Clear run records and matching Freqtrade artifacts for the active workspace.</p><div role="alert" class="alert alert-error alert-soft mt-3 text-sm"><span>Clearing moves matching local snapshots and Freqtrade artifacts to the Recycle Bin. Downloaded datasets and strategy templates are kept.</span></div><div class="mt-3 grid gap-3 md:grid-cols-3"><div class="rounded-box border border-error/35 bg-base-100 p-4"><h4 class="font-medium">Backtests</h4><p class="mt-1 text-sm text-base-content/70">Clears saved backtest history and Freqtrade backtest exports.</p><button class="btn btn-error btn-sm mt-3" :disabled="clearingKind !== ''" @click="requestClear('backtests')">Clear backtests<span v-if="clearingKind === 'backtests'" class="loading loading-spinner loading-xs"></span></button></div><div class="rounded-box border border-error/35 bg-base-100 p-4"><h4 class="font-medium">Hyperopts</h4><p class="mt-1 text-sm text-base-content/70">Clears saved Hyperopt history and Freqtrade search artifacts.</p><button class="btn btn-error btn-sm mt-3" :disabled="clearingKind !== ''" @click="requestClear('hyperopts')">Clear hyperopts<span v-if="clearingKind === 'hyperopts'" class="loading loading-spinner loading-xs"></span></button></div><div class="rounded-box border border-error/35 bg-base-100 p-4"><h4 class="font-medium">Validations</h4><p class="mt-1 text-sm text-base-content/70">Clears validation snapshots and split-result artifacts.</p><button class="btn btn-error btn-sm mt-3" :disabled="clearingKind !== ''" @click="requestClear('validations')">Clear validations<span v-if="clearingKind === 'validations'" class="loading loading-spinner loading-xs"></span></button></div></div></div>
+        <div class="mt-6"><div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-medium">Downloaded datasets</h3><p class="text-sm text-base-content/70">Cached Freqtrade candles are listed only; clearing them is not available yet.</p></div><button class="btn btn-sm" @click="refreshDatasets">Refresh</button></div><ul v-if="datasets.length" class="list mt-2 rounded-box border border-base-300"><li v-for="dataset in datasets" :key="dataset.path" class="list-row"><span class="list-col-grow break-all">{{ dataset.path }}</span><span class="text-sm text-base-content/60">{{ (dataset.bytes / 1024 / 1024).toFixed(2) }} MB</span></li></ul><p v-else class="mt-3 text-sm text-base-content/60">No downloaded Freqtrade datasets in this workspace.</p></div>
+      </div></section>
+      <template v-if="activeTab !== 'settings'">
       <section class="card bg-base-200"><div class="card-body"><h2 class="card-title">Data visualization</h2><template v-if="selected"><div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div v-for="(value, name) in selected.metrics" :key="String(name)" class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">{{ name }}</div><div class="mt-1 text-xl font-medium" :class="valueTone(String(name), value)">{{ metricValue(value) }}</div></div></div><div class="mt-4"><EquityChart :equity="selected.equity_curve" :timestamps="selected.equity_timestamps" /></div>
         <div class="mt-4"><h3 class="mb-2 font-medium">Positions</h3><div class="max-h-96 overflow-auto rounded-box border border-base-300"><table class="table table-pin-rows table-sm"><thead><tr><th v-for="column in tradeColumns" :key="column"><button class="btn btn-ghost btn-xs" @click="toggleSort(column)">{{ column }} <span v-if="sortColumn === column">{{ sortDirection === 'asc' ? '▲' : '▼' }}</span></button></th></tr></thead><tbody><tr v-for="(trade, index) in visibleTrades" :key="index"><td v-for="column in tradeColumns" :key="column"><span :class="valueTone(column, trade[column])">{{ tableValue(column, trade[column]) }}</span></td></tr></tbody></table></div><div class="mt-3 flex items-center justify-end gap-2"><button class="btn btn-sm" :disabled="page === 1" @click="page--">Previous</button><span class="text-sm">{{ page }} / {{ pageCount }}</span><button class="btn btn-sm" :disabled="page === pageCount" @click="page++">Next</button></div></div></template><p v-else class="text-base-content/60">Run or load a Freqtrade strategy to view metrics, charts, and positions.</p></div></section>
       <section class="card bg-base-200"><div class="card-body"><h2 class="card-title">Local history</h2><div class="flex flex-wrap gap-2"><button v-for="item in history" :key="item.id" class="btn btn-sm" :class="selected?.id === item.id ? 'btn-neutral' : ''" @click="selectHistory(item)">{{ item.name }}</button><span v-if="!history.length" class="text-sm text-base-content/60">No Freqtrade runs saved yet.</span></div></div></section>
       <section class="card bg-base-200"><div class="card-body"><h2 class="card-title">Run output</h2><textarea :value="output" readonly class="textarea h-48 w-full" placeholder="Freqtrade CLI output and parser diagnostics appear here." /></div></section>
+      </template>
     </section>
   </main>
+  <dialog class="modal" :open="pendingClearKind !== null" @cancel.prevent="pendingClearKind = null">
+    <div class="modal-box border border-error/50">
+      <h3 class="text-lg font-bold text-error">Clear {{ pendingClearKind }}?</h3>
+      <p class="py-4">Saved {{ pendingClearKind }} and matching Freqtrade artifacts will move to the Recycle Bin. Downloaded datasets will stay untouched.</p>
+      <div class="modal-action"><button class="btn" type="button" @click="pendingClearKind = null">Cancel</button><button class="btn btn-error" type="button" @click="clearResults">Clear {{ pendingClearKind }}</button></div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button type="button" aria-label="Cancel clear operation" @click="pendingClearKind = null">Cancel</button></form>
+  </dialog>
   <div v-if="progress" class="fixed inset-x-0 bottom-0 z-50 bg-base-100 px-5 py-3 shadow-2xl">
     <div class="pointer-events-none absolute -top-20 right-0 h-36 w-64 rounded-tl-[4rem] bg-gradient-to-tl from-base-300/55 via-base-300/25 to-transparent blur-xl shadow-[inset_-2rem_-1.5rem_3rem_-1rem_rgba(0,0,0,0.35)]"></div>
     <button class="btn btn-circle btn-error btn-md absolute -top-16 right-5 z-10 shadow-xl" type="button" aria-label="Emergency stop current run" title="Emergency stop" @click="cancelRun"><svg viewBox="0 0 24 24" aria-hidden="true" class="size-5 fill-current"><rect x="6" y="6" width="12" height="12" rx="1" /></svg></button>

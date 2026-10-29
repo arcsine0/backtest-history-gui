@@ -8,6 +8,7 @@ logic rather than inventing an untestable parameter shape.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from .models import StrategyParameter, StrategySetup
@@ -17,26 +18,28 @@ from .models import StrategyParameter, StrategySetup
 class Component:
     id: str
     label: str
+    file_label: str
     description: str
     parameters: tuple[tuple[str, str, str], ...]
 
 
 ENTRIES = (
-    Component("fvg", "Fair Value Gap", "Three-candle bullish imbalance with an EMA regime filter.", (("ENTER_FVG_MIN_GAP_PCT", "0.002", "Minimum three-candle gap percentage."), ("ENTER_FVG_MAX_GAP_PCT", "0.03", "Maximum accepted gap percentage."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_RSI_MAX", "70", "Maximum RSI allowed for a new gap entry."))),
-    Component("vwap_pullback", "VWAP pullback", "VWAP reclaim after a pullback, filtered by trend.", (("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_RSI_MIN", "35", "Minimum RSI at entry."), ("ENTER_RSI_MAX", "60", "Maximum RSI at entry."), ("ENTER_VWAP_DISTANCE_PCT", "0.003", "Maximum distance below VWAP accepted for a reclaim."))),
-    Component("ema_cross", "EMA crossover", "Fast EMA crossing above slow EMA within a trend regime.", (("ENTER_EMA_FAST", "12", "Fast EMA period."), ("ENTER_EMA_SLOW", "48", "Slow EMA period."), ("ENTER_EMA_TREND", "150", "Long-term trend EMA period."), ("ENTER_CROSS_LOOKBACK", "3", "Candles after a crossover that remain eligible for entry."))),
-    Component("rsi_reversion", "RSI mean reversion", "Oversold RSI recovery while price remains above the trend EMA.", (("ENTER_RSI_PERIOD", "14", "RSI calculation period."), ("ENTER_RSI_MIN", "15", "Minimum RSI allowed for entry."), ("ENTER_RSI_MAX", "32", "Maximum RSI allowed for entry."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."))),
-    Component("macd_trend", "MACD trend continuation", "MACD signal crossover aligned with a trend EMA.", (("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_MACD_FAST", "12", "MACD fast period."), ("ENTER_MACD_SLOW", "26", "MACD slow period."), ("ENTER_MACD_SIGNAL", "9", "MACD signal period."), ("ENTER_CROSS_LOOKBACK", "3", "Candles after a MACD crossover that remain eligible for entry."))),
-    Component("bollinger_reversion", "Bollinger reversion", "Lower-band mean reversion with RSI confirmation.", (("ENTER_BB_PERIOD", "20", "Bollinger Bands period."), ("ENTER_BB_STDDEV", "2.0", "Bollinger Bands standard deviations."), ("ENTER_RSI_MIN", "15", "Minimum RSI allowed for entry."), ("ENTER_RSI_MAX", "35", "Maximum RSI allowed for entry."), ("ENTER_BB_REENTRY_PCT", "0.01", "Allowed percentage above the lower band."))),
-    Component("donchian_breakout", "Donchian breakout", "Breakout above a previous Donchian channel high.", (("ENTER_DONCHIAN_PERIOD", "20", "Donchian lookback period."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_DONCHIAN_BUFFER_PCT", "0.003", "Allowed percentage below the channel high."))),
-    Component("stochastic_reversal", "Stochastic reversal", "Stochastic K/D bullish crossover in an oversold zone.", (("ENTER_STOCH_K", "14", "Stochastic lookback."), ("ENTER_STOCH_D", "3", "Stochastic signal smoothing."), ("ENTER_STOCH_MIN", "5", "Minimum stochastic K allowed for entry."), ("ENTER_STOCH_MAX", "25", "Maximum stochastic K allowed for entry."), ("ENTER_CROSS_LOOKBACK", "3", "Candles after a stochastic crossover that remain eligible for entry."))),
+    Component("fvg", "Fair Value Gap", "FVG", "Three-candle bullish imbalance with an EMA regime filter.", (("ENTER_FVG_MIN_GAP_PCT", "0.002", "Minimum three-candle gap percentage."), ("ENTER_FVG_MAX_GAP_PCT", "0.03", "Maximum accepted gap percentage."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_RSI_MAX", "70", "Maximum RSI allowed for a new gap entry."))),
+    Component("fvg_retest", "FVG retest", "FVGRetest", "Three-candle gap retest within a bounded validity window.", (("ENTER_FVG_MIN_GAP_PCT", "0.002", "Minimum three-candle gap percentage."), ("ENTER_FVG_MAX_GAP_PCT", "0.03", "Maximum accepted gap percentage."), ("ENTER_FVG_VALIDITY_CANDLES", "48", "How long a gap zone remains eligible for a retest."), ("ENTER_FVG_RETEST_TOLERANCE_PCT", "0.003", "Allowed overshoot beyond the gap zone."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_RSI_MAX", "70", "Maximum RSI allowed for a retest."))),
+    Component("vwap_pullback", "VWAP pullback", "VWAP", "VWAP reclaim after a pullback, filtered by trend.", (("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_RSI_MIN", "35", "Minimum RSI at entry."), ("ENTER_RSI_MAX", "60", "Maximum RSI at entry."), ("ENTER_VWAP_DISTANCE_PCT", "0.003", "Maximum distance below VWAP accepted for a reclaim."))),
+    Component("ema_cross", "EMA crossover", "EMACross", "Fast EMA crossing above slow EMA within a trend regime.", (("ENTER_EMA_FAST", "12", "Fast EMA period."), ("ENTER_EMA_SLOW", "48", "Slow EMA period."), ("ENTER_EMA_TREND", "150", "Long-term trend EMA period."), ("ENTER_CROSS_LOOKBACK", "3", "Candles after a crossover that remain eligible for entry."))),
+    Component("rsi_reversion", "RSI mean reversion", "RSIRev", "Oversold RSI recovery while price remains above the trend EMA.", (("ENTER_RSI_PERIOD", "14", "RSI calculation period."), ("ENTER_RSI_MIN", "15", "Minimum RSI allowed for entry."), ("ENTER_RSI_MAX", "32", "Maximum RSI allowed for entry."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."))),
+    Component("macd_trend", "MACD trend continuation", "MACD", "MACD signal crossover aligned with a trend EMA.", (("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_MACD_FAST", "12", "MACD fast period."), ("ENTER_MACD_SLOW", "26", "MACD slow period."), ("ENTER_MACD_SIGNAL", "9", "MACD signal period."), ("ENTER_CROSS_LOOKBACK", "3", "Candles after a MACD crossover that remain eligible for entry."))),
+    Component("bollinger_reversion", "Bollinger reversion", "BBRev", "Lower-band mean reversion with RSI confirmation.", (("ENTER_BB_PERIOD", "20", "Bollinger Bands period."), ("ENTER_BB_STDDEV", "2.0", "Bollinger Bands standard deviations."), ("ENTER_RSI_MIN", "15", "Minimum RSI allowed for entry."), ("ENTER_RSI_MAX", "35", "Maximum RSI allowed for entry."), ("ENTER_BB_REENTRY_PCT", "0.01", "Allowed percentage above the lower band."))),
+    Component("donchian_breakout", "Donchian breakout", "Donchian", "Breakout above a previous Donchian channel high.", (("ENTER_DONCHIAN_PERIOD", "20", "Donchian lookback period."), ("ENTER_EMA_PERIOD", "100", "Trend EMA period."), ("ENTER_DONCHIAN_BUFFER_PCT", "0.003", "Allowed percentage below the channel high."))),
+    Component("stochastic_reversal", "Stochastic reversal", "Stoch", "Stochastic K/D bullish crossover in an oversold zone.", (("ENTER_STOCH_K", "14", "Stochastic lookback."), ("ENTER_STOCH_D", "3", "Stochastic signal smoothing."), ("ENTER_STOCH_MIN", "5", "Minimum stochastic K allowed for entry."), ("ENTER_STOCH_MAX", "25", "Maximum stochastic K allowed for entry."), ("ENTER_CROSS_LOOKBACK", "3", "Candles after a stochastic crossover that remain eligible for entry."))),
 )
 
 EXITS = (
-    Component("atr_trailing", "ATR dynamic trail", "Activates after an ATR profit move and trails from the high by ATR.", (("EXIT_ATR_PERIOD", "14", "ATR calculation period."), ("EXIT_ATR_ACTIVATION", "1.5", "ATR profit move required to activate."), ("EXIT_ATR_TRAIL", "2.5", "ATR distance behind the high after activation."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."))),
-    Component("chandelier", "Chandelier trail", "Chandelier-style ATR trail from the trade high with an activation threshold.", (("EXIT_ATR_PERIOD", "22", "ATR calculation period."), ("EXIT_CHANDELIER_ACTIVATION", "1.0", "ATR profit move required to activate."), ("EXIT_CHANDELIER_TRAIL", "3.0", "ATR distance behind the high."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."))),
-    Component("rsi_trailing", "RSI activated trail", "Activates after RSI strength, then trails price by a percentage.", (("EXIT_RSI_ACTIVATION", "68", "RSI threshold that arms the trail."), ("EXIT_RSI_TRAIL_PCT", "0.025", "Percentage distance below the high after activation."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."))),
-    Component("profit_trailing", "Profit-step trail", "Activates at a profit threshold, then trails from the trade high.", (("EXIT_PROFIT_ACTIVATION", "0.03", "Profit percentage that arms the trail."), ("EXIT_PROFIT_TRAIL_PCT", "0.02", "Percentage distance below the high after activation."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."))),
+    Component("atr_trailing", "ATR dynamic trail", "ATR", "Activates after an ATR profit move and trails from the high by ATR.", (("EXIT_ATR_PERIOD", "14", "ATR calculation period."), ("EXIT_ATR_ACTIVATION", "1.5", "ATR profit move required to activate."), ("EXIT_ATR_TRAIL", "2.5", "ATR distance behind the high after activation."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."), ("EXIT_MAX_HOLD_CANDLES", "288", "Maximum candles to hold a position before exit."))),
+    Component("chandelier", "Chandelier trail", "Chandelier", "Chandelier-style ATR trail from the trade high with an activation threshold.", (("EXIT_ATR_PERIOD", "22", "ATR calculation period."), ("EXIT_CHANDELIER_ACTIVATION", "1.0", "ATR profit move required to activate."), ("EXIT_CHANDELIER_TRAIL", "3.0", "ATR distance behind the high."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."), ("EXIT_MAX_HOLD_CANDLES", "288", "Maximum candles to hold a position before exit."))),
+    Component("rsi_trailing", "RSI activated trail", "RSITrail", "Activates after RSI strength, then trails price by a percentage.", (("EXIT_RSI_ACTIVATION", "68", "RSI threshold that arms the trail."), ("EXIT_RSI_TRAIL_PCT", "0.025", "Percentage distance below the high after activation."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."), ("EXIT_MAX_HOLD_CANDLES", "288", "Maximum candles to hold a position before exit."))),
+    Component("profit_trailing", "Profit-step trail", "ProfitTrail", "Activates at a profit threshold, then trails from the trade high.", (("EXIT_PROFIT_ACTIVATION", "0.03", "Profit percentage that arms the trail."), ("EXIT_PROFIT_TRAIL_PCT", "0.02", "Percentage distance below the high after activation."), ("EXIT_INITIAL_STOP_PCT", "0.08", "Maximum loss before the trail activates."), ("EXIT_MAX_HOLD_CANDLES", "288", "Maximum candles to hold a position before exit."))),
 )
 
 COMMON_ENTRY_PARAMETERS = (
@@ -46,6 +49,7 @@ COMMON_ENTRY_PARAMETERS = (
 
 PRESETS = (
     ("fvg_atr", "FVG + ATR trail", "fvg", "atr_trailing"),
+    ("fvg_retest_atr", "FVG retest + ATR trail", "fvg_retest", "atr_trailing"),
     ("vwap_atr", "VWAP pullback + ATR trail", "vwap_pullback", "atr_trailing"),
     ("ema_chandelier", "EMA crossover + Chandelier", "ema_cross", "chandelier"),
     ("rsi_profit", "RSI reversion + Profit-step trail", "rsi_reversion", "profit_trailing"),
@@ -61,14 +65,14 @@ def list_templates() -> list[dict[str, str]]:
 
 
 def list_entries() -> list[dict[str, str]]:
-    return [{"id": item.id, "label": item.label, "description": item.description} for item in ENTRIES]
+    return [{"id": item.id, "label": item.label, "file_label": item.file_label, "description": item.description} for item in ENTRIES]
 
 
 def list_exits() -> list[dict[str, str]]:
-    return [{"id": item.id, "label": item.label, "description": item.description} for item in EXITS]
+    return [{"id": item.id, "label": item.label, "file_label": item.file_label, "description": item.description} for item in EXITS]
 
 
-def make_template_strategy(name: str, template_id: str, workspace_path: str, entry_id: str = "", exit_id: str = "") -> StrategySetup:
+def make_template_strategy(name: str, template_id: str, workspace_path: str, entry_id: str = "", exit_id: str = "", trading_mode: str = "futures", pairs: str = "", timeframes: str = "") -> StrategySetup:
     preset = _preset(template_id)
     entry_id = entry_id or preset[2]
     exit_id = exit_id or preset[3]
@@ -76,7 +80,7 @@ def make_template_strategy(name: str, template_id: str, workspace_path: str, ent
     parameters = _parameters(entry, exit_rule)
     class_name = _class_name(name)
     return StrategySetup(
-        name=name.strip() or f"{entry.label} {exit_rule.label}",
+        name=name.strip() or _generated_name(entry, exit_rule, trading_mode, pairs, timeframes),
         source=f"{entry.description} {exit_rule.description}",
         workspace_path=workspace_path,
         template_id=_matching_preset(entry_id, exit_id) or "custom",
@@ -100,6 +104,7 @@ def render_strategy(class_name: str, entry_id: str, exit_id: str) -> str:
     indicator_lines += _exit_indicators(exit_id)
     exit_logic = _exit_logic(exit_id)
     return f'''"""Generated by Backtest Studio. Safe to copy into user_data/strategies."""
+from datetime import timedelta
 from pandas import DataFrame
 import talib.abstract as ta
 from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, stoploss_from_absolute
@@ -109,7 +114,7 @@ class {class_name}(IStrategy):
     timeframe = "5m"
     startup_candle_count = 250
     can_short = False
-    stoploss = -0.15
+    stoploss = -0.25
     minimal_roi = {{"0": 0.99}}
     use_exit_signal = True
     use_custom_stoploss = True
@@ -134,6 +139,11 @@ class {class_name}(IStrategy):
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         return dataframe
 
+    def custom_exit(self, pair, trade, current_time, current_rate, current_profit, **kwargs):
+        if current_time - trade.open_date_utc >= timedelta(minutes=5 * self.exit_max_hold_candles.value):
+            return "max_hold"
+        return None
+
     def custom_stoploss(self, pair, trade, current_time, current_rate, current_profit, after_fill, **kwargs):
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if dataframe.empty:
@@ -149,6 +159,8 @@ def _parameters(entry: Component, exit_rule: Component) -> list[StrategyParamete
 
 def _declaration(name: str, value: str) -> str:
     key = name.lower()
+    if name == "EXIT_INITIAL_STOP_PCT":
+        return f'    {key} = DecimalParameter(0.005, 0.15, default={value}, decimals=4, space="exit", optimize=True)'
     if "PCT" in name or "ACTIVATION" in name or "TRAIL" in name or "STDDEV" in name or "GAP" in name or "MULTIPLIER" in name or "BUFFER" in name:
         low, high, decimals = (0.0001, 0.20, 4) if "PCT" in name or "GAP" in name or "BUFFER" in name else (0.1, 6.0, 1)
         if "ACTIVATION" in name and "RSI" not in name: low, high, decimals = 0.5, 6.0, 1
@@ -158,7 +170,7 @@ def _declaration(name: str, value: str) -> str:
         return f'    {key} = {kind}({low}, {high}, default={value}, decimals={decimals}, space="{space}", optimize=True)'
     if "RSI" in name or "STOCH" in name:
         return f'    {key} = IntParameter(5, 90, default={value}, space="enter", optimize=True)'
-    if "MACD" in name or "EMA" in name or "PERIOD" in name or "DONCHIAN" in name or "LOOKBACK" in name:
+    if "MACD" in name or "EMA" in name or "PERIOD" in name or "DONCHIAN" in name or "LOOKBACK" in name or "CANDLES" in name:
         space = "exit" if name.startswith("EXIT") else "enter"
         return f'    {key} = IntParameter(3, 250, default={value}, space="{space}", optimize=True)'
     return f'    {key} = DecimalParameter(0.001, 0.20, default={value}, decimals=3, space="exit", optimize=True)'
@@ -167,6 +179,8 @@ def _declaration(name: str, value: str) -> str:
 def _entry_logic(entry_id: str) -> tuple[str, str]:
     if entry_id == "fvg":
         return "        dataframe['ema'] = ta.EMA(dataframe, timeperiod=self.enter_ema_period.value)\n        dataframe['fvg_gap'] = dataframe['low'] / dataframe['high'].shift(2) - 1", "(dataframe['fvg_gap'] >= self.enter_fvg_min_gap_pct.value) & (dataframe['fvg_gap'] <= self.enter_fvg_max_gap_pct.value) & (dataframe['close'] > dataframe['ema']) & (dataframe['rsi'] <= self.enter_rsi_max.value)"
+    if entry_id == "fvg_retest":
+        return "        dataframe['ema'] = ta.EMA(dataframe, timeperiod=self.enter_ema_period.value)\n        dataframe['fvg_gap'] = dataframe['low'] / dataframe['high'].shift(2) - 1\n        dataframe['fvg_valid'] = (dataframe['fvg_gap'] >= self.enter_fvg_min_gap_pct.value) & (dataframe['fvg_gap'] <= self.enter_fvg_max_gap_pct.value)\n        dataframe['fvg_lower'] = dataframe['high'].shift(2).where(dataframe['fvg_valid']).shift(1).ffill(limit=self.enter_fvg_validity_candles.value)\n        dataframe['fvg_upper'] = dataframe['low'].where(dataframe['fvg_valid']).shift(1).ffill(limit=self.enter_fvg_validity_candles.value)", "dataframe['fvg_lower'].notna() & (dataframe['low'] <= dataframe['fvg_upper'] * (1 + self.enter_fvg_retest_tolerance_pct.value)) & (dataframe['close'] >= dataframe['fvg_lower']) & (dataframe['close'] > dataframe['ema']) & (dataframe['rsi'] <= self.enter_rsi_max.value)"
     if entry_id == "vwap_pullback":
         return "        dataframe['ema'] = ta.EMA(dataframe, timeperiod=self.enter_ema_period.value)\n        dataframe['vwap'] = (dataframe['close'] * dataframe['volume']).cumsum() / dataframe['volume'].cumsum().replace(0, float('nan'))", "(dataframe['close'] >= dataframe['vwap'] * (1 - self.enter_vwap_distance_pct.value)) & (dataframe['close'].shift(1) <= dataframe['vwap'].shift(1)) & (dataframe['close'] > dataframe['ema']) & (dataframe['rsi'] >= self.enter_rsi_min.value) & (dataframe['rsi'] <= self.enter_rsi_max.value)"
     if entry_id == "ema_cross":
@@ -221,3 +235,11 @@ def _raise_unknown(component_id: str) -> Component:
 def _class_name(name: str) -> str:
     parts = "".join(character if character.isalnum() else " " for character in name).split()
     return "".join(part[:1].upper() + part[1:] for part in parts) or "StudioStrategy"
+
+
+def _generated_name(entry: Component, exit_rule: Component, trading_mode: str, pairs: str, timeframes: str) -> str:
+    pair = next((item.strip() for item in pairs.split(",") if item.strip()), "market")
+    pair = pair.split(":", maxsplit=1)[0].replace("/", "-")
+    timeframe = next((item.strip() for item in timeframes.split(",") if item.strip()), "timeframe")
+    market = {"futures": "Futures", "margin": "Margin", "spot": "Spot"}.get(trading_mode.lower(), "Market")
+    return f"{entry.file_label}-{exit_rule.file_label}-{market}-{pair}-{timeframe}-{datetime.now():%Y%m%d-%H%M%S}"
