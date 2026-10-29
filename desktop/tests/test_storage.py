@@ -7,6 +7,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 from pathlib import Path
 import sys
+from threading import Event
 
 PACKAGE = Path(__file__).parents[1] / "src-tauri" / "src-python" / "backtest_history_gui"
 package = types.ModuleType("backtest_history_gui")
@@ -63,6 +64,28 @@ class FreqtradeStorageTests(unittest.TestCase):
         hyperopt = runner.hyperopt_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("data"), 10)
         self.assertEqual(hyperopt[3], "hyperopt")
         self.assertEqual(hyperopt[hyperopt.index("--spaces") + 1:hyperopt.index("--spaces") + 3], ["enter", "exit"])
+        custom = runner.hyperopt_command(Path("config.json"), "FvgAtr", Path("strategies"), Path("data"), 10, loss_name="StudioGoalHyperOptLoss", hyperopt_path=Path("hyperopts"))
+        self.assertEqual(custom[custom.index("--hyperopt-loss") + 1], "StudioGoalHyperOptLoss")
+        self.assertIn("--hyperopt-path", custom)
+
+    def test_goal_loss_and_validation_score_reward_trade_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loss_name, loss_path = runner.write_goal_hyperopt_loss(Path(directory), {"profile": "higher_frequency", "target_trades_per_year": 200, "max_drawdown_pct": 20, "min_profit_factor": 1.2})
+            self.assertEqual(loss_name, "StudioGoalHyperOptLoss")
+            source = (loss_path / "StudioGoalHyperOptLoss.py").read_text(encoding="utf-8")
+            self.assertIn("annualized_trades", source)
+            compile(source, "<goal-loss>", "exec")
+        high_coverage, _ = runner.validation_stability_score([1.0, 1.1], [20, 20], 10)
+        low_coverage, _ = runner.validation_stability_score([1.0, 1.1], [1, 1], 10)
+        self.assertGreater(high_coverage, low_coverage)
+
+    def test_validation_snapshot_contains_all_splits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            setup = templates.make_template_strategy("FVG ATR", "fvg_atr", directory)
+            payload = {"training": {"backtest": {"metrics": {"Return [%]": 1}, "trades": [], "equity_curve": [100, 101]}}, "tests": [{"label": "Test 1", "backtest": {"metrics": {"Return [%]": 2}, "trades": [], "equity_curve": [100, 102]}}]}
+            path = Path(directory) / "validation.sqlite3"
+            storage.save_validation_file(setup, payload, path)
+            self.assertEqual(snapshots.load_freqtrade_snapshot(path)["validations"], [payload])
 
     def test_templates_compose_entry_and_dynamic_exit_parameters(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,6 +129,28 @@ class FreqtradeStorageTests(unittest.TestCase):
         self.assertTrue(training.startswith("20210101T0000-"))
         self.assertEqual(len(tests), 10)
         self.assertTrue(tests[0].startswith(training.split("-")[1]))
+        self.assertEqual(len(runner.walk_forward_ranges(datetime(2021, 1, 1, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc), 5)[1]), 5)
+
+    def test_uses_local_candle_cache_only_when_it_covers_the_requested_range(self):
+        with patch.object(runner, "available_candle_range", return_value=(datetime(2021, 1, 1, tzinfo=timezone.utc), datetime(2026, 11, 2, tzinfo=timezone.utc))):
+            self.assertTrue(runner.data_covers_timerange(Path("data"), ["BTC/USDT:USDT"], ["5m"], "20231029-20261029"))
+            self.assertFalse(runner.data_covers_timerange(Path("data"), ["BTC/USDT:USDT"], ["5m"], "20201029-20261029"))
+
+    def test_cancels_running_freqtrade_command_without_returning_output(self):
+        cancelled = Event()
+        cancelled.set()
+        with self.assertRaises(runner.RunCancelled):
+            runner.run([sys.executable, "-c", "import time; time.sleep(10)"], Path.cwd(), cancelled)
+
+    def test_streams_command_output_to_progress_callback(self):
+        lines: list[str] = []
+        runner.run([sys.executable, "-c", "print('Epoch 1/2')"], Path.cwd(), on_output=lines.append)
+        self.assertEqual(lines, ["Epoch 1/2\n"])
+
+    def test_polls_running_command_when_output_is_not_line_based(self):
+        polls: list[bool] = []
+        runner.run([sys.executable, "-c", "import time; time.sleep(.3)"], Path.cwd(), on_poll=lambda: polls.append(True))
+        self.assertTrue(polls)
 
 
 if __name__ == "__main__":

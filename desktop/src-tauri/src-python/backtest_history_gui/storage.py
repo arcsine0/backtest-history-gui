@@ -26,6 +26,12 @@ CREATE TABLE IF NOT EXISTS imported_backtests (
     payload_json TEXT NOT NULL,
     imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS validation_runs (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -67,6 +73,22 @@ def save_strategy_file(setup: StrategySetup, payload: dict[str, Any], path: Path
     try:
         save_strategy(snapshot, setup.model_copy(update={"id": None}))
         import_backtest(snapshot, path.name, payload)
+    finally:
+        snapshot.close()
+    setup.strategy_file = str(path)
+    return setup
+
+
+def save_validation_file(setup: StrategySetup, payload: dict[str, Any], path: Path) -> StrategySetup:
+    """Persist all train/test slices with a portable strategy snapshot."""
+    snapshot = open_database(path)
+    try:
+        save_strategy(snapshot, setup.model_copy(update={"id": None}))
+        training = payload.get("training", {}).get("backtest")
+        if isinstance(training, dict):
+            import_backtest(snapshot, path.name, training)
+        snapshot.execute("INSERT INTO validation_runs (name, payload_json) VALUES (?, ?)", (path.name, json.dumps(payload)))
+        snapshot.commit()
     finally:
         snapshot.close()
     setup.strategy_file = str(path)

@@ -23,12 +23,16 @@ def load_freqtrade_snapshot(path: str | Path) -> dict[str, Any]:
             raise ValueError("Snapshot does not contain a strategy setup.")
         columns = [column[0] for column in connection.execute("SELECT * FROM strategy_setups LIMIT 0").description]
         setup = dict(zip(columns, row))
+        try:
+            validations = [json.loads(item[0]) for item in connection.execute("SELECT payload_json FROM validation_runs ORDER BY id DESC")]
+        except sqlite3.OperationalError:
+            validations = []
     finally:
         connection.close()
     payload = json.loads(setup.get("freqtrade_payload_json") or "{}")
     if payload.get("format") not in {"freqtrade-strategy-v1", "freqtrade-strategy-v2"} or not payload.get("strategy_source"):
         raise ValueError("Snapshot does not contain a Freqtrade strategy export.")
-    return {"name": setup["name"], "template_id": setup.get("template_id", ""), "parameters": json.loads(setup["parameters_json"]), "payload": payload}
+    return {"name": setup["name"], "template_id": setup.get("template_id", ""), "parameters": json.loads(setup["parameters_json"]), "payload": payload, "validations": validations}
 
 
 def export_strategy(snapshot_path: str | Path, destination: str | Path) -> Path:

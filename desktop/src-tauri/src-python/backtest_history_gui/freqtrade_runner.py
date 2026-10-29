@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import subprocess
 import sys
+from queue import Empty, Queue
+from threading import Event, Thread
 from datetime import datetime, timezone
 from zipfile import ZipFile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def download_data_command(exchange: str, trading_mode: str, pairs: list[str], timeframes: list[str], data_path: Path, timerange: str = "") -> list[str]:
@@ -23,13 +26,13 @@ def download_data_command(exchange: str, trading_mode: str, pairs: list[str], ti
     return command
 
 
-def default_timerange() -> str:
-    """Five calendar years ending today, used when the UI leaves timerange blank."""
+def default_timerange(years: int = 1) -> str:
+    """Calendar-year range ending today, used when the UI leaves timerange blank."""
     end = datetime.now(timezone.utc)
     try:
-        start = end.replace(year=end.year - 5)
+        start = end.replace(year=end.year - years)
     except ValueError:  # February 29th
-        start = end.replace(year=end.year - 5, day=28)
+        start = end.replace(year=end.year - years, day=28)
     return f"{start:%Y%m%d}-{end:%Y%m%d}"
 
 
@@ -60,6 +63,25 @@ def available_candle_range(data_path: Path, pair: str, timeframe: str) -> tuple[
     return dates.min().to_pydatetime(), dates.max().to_pydatetime()
 
 
+def data_covers_timerange(data_path: Path, pairs: list[str], timeframes: list[str], timerange: str) -> bool:
+    """Avoid a network refresh when every requested local candle file covers the range."""
+    try:
+        start_text, end_text = timerange.split("-", maxsplit=1)
+        start = datetime.strptime(start_text[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+        end = datetime.strptime(end_text[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    try:
+        for pair in pairs:
+            for timeframe in timeframes:
+                available_start, available_end = available_candle_range(data_path, pair, timeframe)
+                if start < available_start or end > available_end:
+                    return False
+        return True
+    except ValueError:
+        return False
+
+
 def backtest_command(config_path: Path, strategy_name: str, strategy_path: Path, output_path: Path, data_path: Path, timerange: str = "") -> list[str]:
     command = [sys.executable, "-m", "freqtrade", "backtesting", "--config", str(config_path), "--strategy", strategy_name, "--strategy-path", str(strategy_path), "--datadir", str(data_path), "--export", "trades", "--backtest-directory", str(output_path)]
     if timerange:
@@ -67,11 +89,68 @@ def backtest_command(config_path: Path, strategy_name: str, strategy_path: Path,
     return command
 
 
-def hyperopt_command(config_path: Path, strategy_name: str, strategy_path: Path, data_path: Path, epochs: int, timerange: str = "") -> list[str]:
-    command = [sys.executable, "-m", "freqtrade", "hyperopt", "--config", str(config_path), "--strategy", strategy_name, "--strategy-path", str(strategy_path), "--datadir", str(data_path), "--epochs", str(epochs), "--spaces", "enter", "exit", "--hyperopt-loss", "SharpeHyperOptLossDaily"]
+def hyperopt_command(config_path: Path, strategy_name: str, strategy_path: Path, data_path: Path, epochs: int, timerange: str = "", loss_name: str = "SharpeHyperOptLossDaily", hyperopt_path: Path | None = None) -> list[str]:
+    command = [sys.executable, "-m", "freqtrade", "hyperopt", "--config", str(config_path), "--strategy", strategy_name, "--strategy-path", str(strategy_path), "--datadir", str(data_path), "--epochs", str(epochs), "--spaces", "enter", "exit", "--hyperopt-loss", loss_name]
+    if hyperopt_path:
+        command.extend(["--hyperopt-path", str(hyperopt_path)])
     if timerange:
         command.extend(["--timerange", timerange])
     return command
+
+
+def write_goal_hyperopt_loss(workspace: Path, goal: dict[str, Any]) -> tuple[str, Path]:
+    """Generate the Freqtrade loss objective from the UI's bounded goal values."""
+    profile = str(goal.get("profile", "balanced"))
+    frequency_weight, return_weight, drawdown_weight = {
+        "higher_frequency": (2.0, 1.0, 1.0),
+        "return_focused": (0.5, 2.0, 1.0),
+        "capital_preservation": (0.5, 1.0, 2.0),
+    }.get(profile, (1.0, 1.0, 1.0))
+    target = int(goal.get("target_trades_per_year", 100))
+    max_drawdown = float(goal.get("max_drawdown_pct", 25)) / 100
+    minimum_profit_factor = float(goal.get("min_profit_factor", 1.1))
+    directory = workspace / "user_data" / "hyperopts"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "StudioGoalHyperOptLoss.py"
+    path.write_text(f'''from datetime import datetime
+from math import inf
+from typing import Any
+
+from freqtrade.optimize.hyperopt import IHyperOptLoss
+
+
+class StudioGoalHyperOptLoss(IHyperOptLoss):
+    @staticmethod
+    def hyperopt_loss_function(*, results, trade_count: int, min_date: datetime, max_date: datetime, backtest_stats: dict[str, Any], **kwargs) -> float:
+        years = max((max_date - min_date).total_seconds() / 31_557_600, 1 / 365)
+        annualized_trades = trade_count / years
+        profits = results["profit_ratio"]
+        gross_profit = float(profits[profits > 0].sum())
+        gross_loss = abs(float(profits[profits < 0].sum()))
+        profit_factor = gross_profit / gross_loss if gross_loss else (inf if gross_profit else 0.0)
+        total_profit = float(profits.sum())
+        drawdown = float(backtest_stats.get("max_drawdown_account", 0.0) or 0.0)
+        frequency_shortfall = max(0.0, ({target} - annualized_trades) / {target})
+        drawdown_excess = max(0.0, (drawdown - {max_drawdown}) / {max_drawdown})
+        profit_factor_shortfall = max(0.0, {minimum_profit_factor} - profit_factor) if profit_factor != inf else 0.0
+        return ({frequency_weight} * frequency_shortfall ** 2) + ({drawdown_weight} * drawdown_excess * 2) + (profit_factor_shortfall * 2) + max(0.0, -total_profit) * 10 - ({return_weight} * total_profit)
+''', encoding="utf-8")
+    return "StudioGoalHyperOptLoss", directory
+
+
+def validation_stability_score(test_returns: list[float], trade_counts: list[int], minimum_trades_per_test: int) -> tuple[float, float]:
+    """Discount stable returns that are based on too few out-of-sample trades."""
+    if not test_returns or len(test_returns) != len(trade_counts):
+        return 0.0, 0.0
+    mean_return = sum(test_returns) / len(test_returns)
+    if mean_return <= 0:
+        return 0.0, mean_return
+    variance = sum((value - mean_return) ** 2 for value in test_returns) / len(test_returns)
+    base_score = 100 / (1 + variance ** 0.5)
+    required_total = minimum_trades_per_test * len(trade_counts)
+    total_coverage = min(1.0, sum(trade_counts) / required_total)
+    weakest_coverage = min(1.0, min(trade_counts) / minimum_trades_per_test)
+    return round(base_score * total_coverage ** 0.5 * weakest_coverage ** 0.5, 2), mean_return
 
 
 def userdir_command(user_data_path: Path) -> list[str]:
@@ -114,11 +193,58 @@ def ensure_config(config_path: str, workspace: Path, exchange: str, trading_mode
     return target
 
 
-def run(command: list[str], working_directory: Path) -> str:
-    result = subprocess.run(command, cwd=working_directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
-    if result.returncode:
-        raise RuntimeError(f"Freqtrade exited with code {result.returncode}.\n{result.stdout[-4000:]}")
-    return result.stdout
+class RunCancelled(Exception):
+    pass
+
+
+def run(command: list[str], working_directory: Path, cancel_event: Event | None = None, on_output: Callable[[str], None] | None = None, on_poll: Callable[[], None] | None = None) -> str:
+    process = subprocess.Popen(command, cwd=working_directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    lines: Queue[str | None] = Queue()
+
+    def read_output() -> None:
+        assert process.stdout
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    Thread(target=read_output, daemon=True).start()
+    output: list[str] = []
+    while True:
+        if on_poll:
+            on_poll()
+        if cancel_event and cancel_event.is_set():
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            if process.stdout:
+                process.stdout.close()
+            raise RunCancelled("Freqtrade run cancelled. No snapshot was saved.")
+        try:
+            line = lines.get(timeout=0.25)
+            if line is None:
+                break
+            output.append(line)
+            if on_output:
+                on_output(line)
+        except Empty:
+            continue
+    process.wait()
+    if on_poll:
+        on_poll()
+    if process.stdout:
+        process.stdout.close()
+    stdout = "".join(output)
+    if process.returncode:
+        raise RuntimeError(f"Freqtrade exited with code {process.returncode}.\n{stdout[-4000:]}")
+    if cancel_event and cancel_event.is_set():
+        raise RunCancelled("Freqtrade run cancelled. No snapshot was saved.")
+    return stdout
 
 
 def data_is_available(data_path: Path) -> bool:

@@ -11,7 +11,7 @@ dependencies = [
     "pytauri == 0.8.*",
     "pydantic == 2.*",
     "anyio == 4.*",
-    "freqtrade>=2026.5",
+    "freqtrade[hyperopt]>=2026.5",
 ]
 
 [project.entry-points.pytauri]

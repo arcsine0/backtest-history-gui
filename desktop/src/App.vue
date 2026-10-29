@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { pyInvoke } from "tauri-plugin-pytauri-api";
 import EquityChart from "./components/EquityChart.vue";
@@ -9,7 +9,8 @@ type Strategy = { id?: number; name: string; source: string; workspace_path: str
 type Backtest = { id: number; name: string; imported_at: string; metrics: Record<string, unknown>; trades: Record<string, unknown>[]; equity_curve: number[]; equity_timestamps: string[] };
 type StrategyRun = { strategy: Strategy; backtest: Backtest | null; output: string; error?: string | null };
 type ValidationSlice = { label: string; timerange: string; backtest: Backtest };
-type ValidationRun = { training: ValidationSlice; tests: ValidationSlice[]; stability_score: number; mean_return: number; return_stddev: number; coverage: string; output: string };
+type OptimizationGoal = { profile: "balanced" | "higher_frequency" | "return_focused" | "capital_preservation"; target_trades_per_year: number; min_trades_per_test: number; max_drawdown_pct: number; min_profit_factor: number };
+type ValidationRun = { training: ValidationSlice; tests: ValidationSlice[]; stability_score: number; mean_return: number; return_stddev: number; total_test_trades: number; minimum_test_trades: number; coverage: string; output: string; snapshot_path?: string | null };
 type Template = { id: string; label: string; entry_id: string; exit_id: string };
 type StrategyComponent = { id: string; label: string; description: string };
 type SortDirection = "asc" | "desc" | null;
@@ -23,15 +24,25 @@ const exitId = ref("atr_trailing");
 const history = ref<Backtest[]>([]);
 const selected = ref<Backtest | null>(null);
 const configPath = ref("");
-function fiveYearTimerange() {
+function calendarTimerange(years: number) {
   const end = new Date();
   const start = new Date(end);
-  start.setFullYear(end.getFullYear() - 5);
+  start.setFullYear(end.getFullYear() - years);
   const format = (value: Date) => `${value.getFullYear()}${String(value.getMonth() + 1).padStart(2, "0")}${String(value.getDate()).padStart(2, "0")}`;
   return `${format(start)}-${format(end)}`;
 }
-const timerange = ref(fiveYearTimerange());
+function calendarTimerangeMonths(months: number) {
+  const end = new Date();
+  const start = new Date(end);
+  start.setMonth(start.getMonth() - months);
+  const format = (value: Date) => `${value.getFullYear()}${String(value.getMonth() + 1).padStart(2, "0")}${String(value.getDate()).padStart(2, "0")}`;
+  return `${format(start)}-${format(end)}`;
+}
+const timerange = ref(calendarTimerange(1));
+const validationTimerange = ref(calendarTimerange(5));
+const quickValidationTimerange = ref(calendarTimerangeMonths(30));
 const epochs = ref(100);
+const optimizationGoal = ref<OptimizationGoal>({ profile: "balanced", target_trades_per_year: 100, min_trades_per_test: 10, max_drawdown_pct: 25, min_profit_factor: 1.1 });
 const exchange = ref("binance");
 const tradingMode = ref("futures");
 const pairs = ref("BTC/USDT:USDT");
@@ -41,7 +52,9 @@ const error = ref("");
 const busy = ref(false);
 const activeTab = ref<"builder" | "optimizer" | "validation">("builder");
 const validation = ref<ValidationRun | null>(null);
-const progress = ref<{ label: string; percent: number } | null>(null);
+type Progress = { active: boolean; label: string; percent: number; sub_label: string; sub_percent: number; steps: string[] };
+const progress = ref<Progress | null>(null);
+let progressPoller: number | undefined;
 const sortColumn = ref<string | null>(null);
 const sortDirection = ref<SortDirection>(null);
 const page = ref(1);
@@ -50,6 +63,33 @@ const perPage = 25;
 async function call<T>(command: string, body?: unknown) {
   error.value = "";
   return pyInvoke<T>(command, body);
+}
+
+async function refreshProgress() {
+  try {
+    const current = await pyInvoke<Progress>("get_freqtrade_progress");
+    if (current.active || busy.value) progress.value = current;
+  } catch {
+    // Browser previews do not have the PyTauri command bridge.
+  }
+}
+
+function startProgress(label: string) {
+  progress.value = { active: true, label, percent: 0, sub_label: "Preparing", sub_percent: 0, steps: [label] };
+  if (progressPoller === undefined) progressPoller = window.setInterval(() => void refreshProgress(), 350);
+}
+
+function stopProgress() {
+  if (progressPoller !== undefined) window.clearInterval(progressPoller);
+  progressPoller = undefined;
+  progress.value = null;
+}
+
+async function cancelRun() {
+  try {
+    await pyInvoke<boolean>("cancel_freqtrade_run");
+    if (progress.value) progress.value = { ...progress.value, label: "Stopping Freqtrade process", sub_label: "Terminating the active Freqtrade process tree", steps: [...progress.value.steps, "Stopping Freqtrade process"] };
+  } catch (cause) { error.value = String(cause); }
 }
 
 async function refresh() {
@@ -91,35 +131,39 @@ function serializableStrategy() {
   return JSON.parse(JSON.stringify(strategy.value)) as Strategy;
 }
 
+function hydrateGoal(next: unknown) {
+  if (!next || typeof next !== "object") return;
+  const value = next as Partial<OptimizationGoal>;
+  if (["balanced", "higher_frequency", "return_focused", "capital_preservation"].includes(String(value.profile))) optimizationGoal.value.profile = value.profile as OptimizationGoal["profile"];
+  for (const key of ["target_trades_per_year", "min_trades_per_test", "max_drawdown_pct", "min_profit_factor"] as const) {
+    if (typeof value[key] === "number" && Number.isFinite(value[key])) optimizationGoal.value[key] = value[key];
+  }
+}
+
 async function run(hyperopt = false) {
   busy.value = true;
-  progress.value = { label: hyperopt ? "Updating market data and optimizing" : "Updating market data and running backtest", percent: 20 };
-  await nextTick();
+  startProgress(hyperopt ? "Starting optimization" : "Starting backtest");
   try {
-    const run = await call<StrategyRun>("run_freqtrade_backtest", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: timerange.value, hyperopt_epochs: hyperopt ? epochs.value : 0 });
-    progress.value = { label: "Saving local SQLite snapshot", percent: 85 };
-    await nextTick();
+    const run = await call<StrategyRun>("run_freqtrade_backtest", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: timerange.value, hyperopt_epochs: hyperopt ? epochs.value : 0, optimization_goal: optimizationGoal.value });
     strategy.value = run.strategy;
     entryId.value = String(run.strategy.freqtrade_payload?.entry_id || entryId.value);
     exitId.value = String(run.strategy.freqtrade_payload?.exit_id || exitId.value);
+    hydrateGoal(run.strategy.freqtrade_payload?.optimization_goal);
     output.value = run.output;
     if (run.error) error.value = run.error;
     if (run.backtest) selected.value = run.backtest;
     await refresh();
-  } catch (cause) { error.value = String(cause); } finally { busy.value = false; progress.value = null; }
+  } catch (cause) { error.value = String(cause); } finally { busy.value = false; stopProgress(); }
 }
 
-async function runValidation() {
+async function runValidation(quick = false) {
   busy.value = true;
-  progress.value = { label: "Updating market data and validating 10 test windows", percent: 20 };
-  await nextTick();
+  startProgress(quick ? "Starting quick validation" : "Starting walk-forward validation");
   try {
-    validation.value = await call<ValidationRun>("run_freqtrade_validation", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: timerange.value });
-    progress.value = { label: "Preparing validation results", percent: 85 };
-    await nextTick();
+    validation.value = await call<ValidationRun>("run_freqtrade_validation", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: quick ? quickValidationTimerange.value : validationTimerange.value, validation_test_count: quick ? 5 : 10, optimization_goal: optimizationGoal.value });
     selected.value = validation.value.training.backtest;
     output.value = validation.value.output;
-  } catch (cause) { error.value = String(cause); } finally { busy.value = false; progress.value = null; }
+  } catch (cause) { error.value = String(cause); } finally { busy.value = false; stopProgress(); }
 }
 
 async function chooseSnapshot() {
@@ -130,6 +174,7 @@ async function chooseSnapshot() {
     strategy.value = run.strategy;
     entryId.value = String(run.strategy.freqtrade_payload?.entry_id || entryId.value);
     exitId.value = String(run.strategy.freqtrade_payload?.exit_id || exitId.value);
+    hydrateGoal(run.strategy.freqtrade_payload?.optimization_goal);
     selected.value = run.backtest;
     output.value = run.output;
   } catch (cause) { error.value = String(cause); }
@@ -174,6 +219,7 @@ function tableValue(column: string, value: unknown) {
   return metricValue(value);
 }
 onMounted(() => refresh().catch((cause) => error.value = String(cause)));
+onBeforeUnmount(stopProgress);
 </script>
 
 <template>
@@ -203,13 +249,15 @@ onMounted(() => refresh().catch((cause) => error.value = String(cause)));
       </div></section>
       <section v-else-if="activeTab === 'optimizer'" class="card bg-base-200"><div class="card-body"><h2 class="card-title">Hyperopt optimizer</h2><p class="text-sm text-base-content/70">Hyperopt refreshes the Builder market data first, then evaluates the deterministic template parameter ranges.</p>
         <div class="mt-3 grid gap-3 md:grid-cols-2"><fieldset class="fieldset"><legend class="fieldset-legend">Hyperopt epochs</legend><input v-model.number="epochs" type="number" min="1" max="10000" class="input w-full" /><p class="label">Higher values explore more parameter combinations.</p></fieldset><div class="rounded-box border border-base-300 p-4"><div class="text-sm text-base-content/60">Current run context</div><div class="mt-1 font-medium">{{ strategy.name || 'Create a template in Builder' }}</div><div class="mt-1 text-sm text-base-content/70">{{ exchange }} · {{ tradingMode }} · {{ pairs }} · {{ timeframes }}<span v-if="timerange"> · {{ timerange }}</span></div></div></div>
+        <div class="mt-4 grid gap-3 md:grid-cols-2"><fieldset class="fieldset"><legend class="fieldset-legend">Optimization goal</legend><select v-model="optimizationGoal.profile" class="select w-full"><option value="balanced">Balanced</option><option value="higher_frequency">Higher frequency</option><option value="return_focused">Return focused</option><option value="capital_preservation">Capital preservation</option></select><p class="label">Generates the Freqtrade loss objective; it does not invent new logic.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Target trades / year</legend><input v-model.number="optimizationGoal.target_trades_per_year" type="number" min="1" max="100000" class="input w-full" /><p class="label">A target, not a reason to accept losing churn.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Minimum trades / validation test</legend><input v-model.number="optimizationGoal.min_trades_per_test" type="number" min="1" max="10000" class="input w-full" /><p class="label">Low-sample tests reduce the stability score.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Maximum drawdown [%]</legend><input v-model.number="optimizationGoal.max_drawdown_pct" type="number" min="0.1" max="100" step="0.1" class="input w-full" /></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Minimum profit factor</legend><input v-model.number="optimizationGoal.min_profit_factor" type="number" min="0" max="100" step="0.1" class="input w-full" /></fieldset></div>
         <div class="mt-3"><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run(true)"><span>Optimize</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
         <div v-if="strategy.parameters.length" class="mt-5"><h3 class="font-medium">Optimizable parameters</h3><div class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"><div v-for="parameter in strategy.parameters" :key="parameter.name" class="rounded-box border border-base-300 p-3"><div class="font-medium">{{ parameter.name }}</div><div class="text-sm text-base-content/70">{{ parameter.value }} · {{ parameter.notes }}</div></div></div></div>
       </div></section>
-      <section v-else class="card bg-base-200"><div class="card-body"><h2 class="card-title">Walk-forward validation</h2><p class="text-sm text-base-content/70">Uses the actual downloaded candle coverage: 70% chronological training, then 10 equal out-of-sample test windows. The score is <span class="font-medium">100 ÷ (1 + σ test return)</span>, and becomes zero when mean test return is not positive.</p>
-        <div class="mt-3 flex flex-wrap items-center gap-3"><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="runValidation"><span>Validate</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button><span class="text-sm text-base-content/60">Targeted data range: {{ timerange }}</span></div>
+      <section v-else class="card bg-base-200"><div class="card-body"><h2 class="card-title">Walk-forward validation</h2><p class="text-sm text-base-content/70">Standard validation uses 70% chronological training and 10 equal out-of-sample test windows. Quick validation uses 2.5 years and 5 test windows. The score is <span class="font-medium">100 ÷ (1 + σ test return)</span>, and becomes zero when mean test return is not positive.</p>
+        <div class="mt-3 flex flex-wrap gap-3"><fieldset class="fieldset min-w-0 w-full md:w-72"><legend class="fieldset-legend">Validation range</legend><input v-model="validationTimerange" class="input min-w-0 w-full" placeholder="20210101-20260101" /><p class="label">Standard: five years and 10 test windows.</p></fieldset><fieldset class="fieldset min-w-0 w-full md:w-80"><legend class="fieldset-legend">Quick validation</legend><input :value="quickValidationTimerange" readonly class="input min-w-0 w-full" /><p class="label">2.5 years and 5 test windows. Reuses local candles when coverage is available.</p></fieldset></div><div class="mt-3 flex flex-wrap gap-3"><button class="btn" :disabled="busy || !strategy.parameters.length" @click="runValidation(true)"><span>Quick Validate</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="runValidation()"><span>Validate</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
         <template v-if="validation"><div class="mt-5 grid gap-3 sm:grid-cols-3"><div class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">Stability score</div><div class="mt-1 text-2xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.stability_score) }}</div><div class="text-xs text-base-content/60">Higher is more stable.</div></div><div class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">Mean test return [%]</div><div class="mt-1 text-xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.mean_return) }}</div></div><div class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">Test return σ</div><div class="mt-1 text-xl font-medium" :class="valueTone('Drawdown [%]', -validation.return_stddev)">{{ metricValue(validation.return_stddev) }}</div><div class="text-xs text-base-content/60">{{ validation.coverage }}</div></div></div>
           <div class="mt-5 max-h-96 overflow-auto rounded-box border border-base-300"><table class="table table-pin-rows table-sm"><thead><tr><th>Split</th><th>Timerange</th><th>Return [%]</th><th>Win Rate [%]</th><th>Profit Factor</th><th></th></tr></thead><tbody><tr v-for="slice in [validation.training, ...validation.tests]" :key="slice.label"><td>{{ slice.label }}</td><td>{{ slice.timerange }}</td><td :class="valueTone('Return [%]', slice.backtest.metrics['Return [%]'])">{{ metricValue(slice.backtest.metrics['Return [%]']) }}</td><td :class="valueTone('Win Rate [%]', slice.backtest.metrics['Win Rate [%]'])">{{ metricValue(slice.backtest.metrics['Win Rate [%]']) }}</td><td :class="valueTone('Profit Factor', slice.backtest.metrics['Profit Factor'])">{{ metricValue(slice.backtest.metrics['Profit Factor']) }}</td><td><button class="btn btn-ghost btn-xs" @click="selectHistory(slice.backtest)">View</button></td></tr></tbody></table></div></template>
+        <div v-if="validation" class="mt-5 rounded-box border border-base-300 p-4"><h3 class="font-medium">Validation confidence</h3><div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Sample-adjusted stability</div><div class="mt-1 text-xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.stability_score) }}</div></div><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Out-of-sample trades</div><div class="mt-1 text-xl font-medium">{{ validation.total_test_trades }}</div><div class="text-xs text-base-content/60">Minimum {{ validation.minimum_test_trades }} per test.</div></div><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Mean test return [%]</div><div class="mt-1 text-xl font-medium" :class="valueTone('Return [%]', validation.mean_return)">{{ metricValue(validation.mean_return) }}</div></div><div class="rounded-box bg-base-100 p-3"><div class="text-sm text-base-content/60">Test return deviation</div><div class="mt-1 text-xl font-medium">{{ metricValue(validation.return_stddev) }}</div></div></div><p v-if="validation.snapshot_path" class="mt-3 text-sm text-base-content/70">Saved validation snapshot: {{ validation.snapshot_path }}</p><div class="mt-3 max-h-80 overflow-auto rounded-box border border-base-300"><table class="table table-pin-rows table-sm"><thead><tr><th>Split</th><th>Trades</th><th>Return [%]</th><th>Profit Factor</th></tr></thead><tbody><tr v-for="slice in [validation.training, ...validation.tests]" :key="`confidence-${slice.label}`"><td>{{ slice.label }}</td><td>{{ metricValue(slice.backtest.metrics['Total Trades']) }}</td><td :class="valueTone('Return [%]', slice.backtest.metrics['Return [%]'])">{{ metricValue(slice.backtest.metrics['Return [%]']) }}</td><td :class="valueTone('Profit Factor', slice.backtest.metrics['Profit Factor'])">{{ metricValue(slice.backtest.metrics['Profit Factor']) }}</td></tr></tbody></table></div></div>
       </div></section>
       <section class="card bg-base-200"><div class="card-body"><h2 class="card-title">Data visualization</h2><template v-if="selected"><div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div v-for="(value, name) in selected.metrics" :key="String(name)" class="rounded-box bg-base-100 p-4"><div class="text-sm text-base-content/60">{{ name }}</div><div class="mt-1 text-xl font-medium" :class="valueTone(String(name), value)">{{ metricValue(value) }}</div></div></div><div class="mt-4"><EquityChart :equity="selected.equity_curve" :timestamps="selected.equity_timestamps" /></div>
         <div class="mt-4"><h3 class="mb-2 font-medium">Positions</h3><div class="max-h-96 overflow-auto rounded-box border border-base-300"><table class="table table-pin-rows table-sm"><thead><tr><th v-for="column in tradeColumns" :key="column"><button class="btn btn-ghost btn-xs" @click="toggleSort(column)">{{ column }} <span v-if="sortColumn === column">{{ sortDirection === 'asc' ? '▲' : '▼' }}</span></button></th></tr></thead><tbody><tr v-for="(trade, index) in visibleTrades" :key="index"><td v-for="column in tradeColumns" :key="column"><span :class="valueTone(column, trade[column])">{{ tableValue(column, trade[column]) }}</span></td></tr></tbody></table></div><div class="mt-3 flex items-center justify-end gap-2"><button class="btn btn-sm" :disabled="page === 1" @click="page--">Previous</button><span class="text-sm">{{ page }} / {{ pageCount }}</span><button class="btn btn-sm" :disabled="page === pageCount" @click="page++">Next</button></div></div></template><p v-else class="text-base-content/60">Run or load a Freqtrade strategy to view metrics, charts, and positions.</p></div></section>
@@ -217,5 +265,13 @@ onMounted(() => refresh().catch((cause) => error.value = String(cause)));
       <section class="card bg-base-200"><div class="card-body"><h2 class="card-title">Run output</h2><textarea :value="output" readonly class="textarea h-48 w-full" placeholder="Freqtrade CLI output and parser diagnostics appear here." /></div></section>
     </section>
   </main>
-  <div v-if="progress" class="fixed inset-x-0 bottom-0 z-50 bg-base-100 px-5 py-2 shadow-2xl"><div class="mb-1 flex justify-between text-xs"><span>{{ progress.label }}</span><span>{{ progress.percent }}%</span></div><progress class="progress progress-primary block w-full" :value="progress.percent" max="100"></progress></div>
+  <div v-if="progress" class="fixed inset-x-0 bottom-0 z-50 bg-base-100 px-5 py-3 shadow-2xl">
+    <div class="pointer-events-none absolute -top-20 right-0 h-36 w-64 rounded-tl-[4rem] bg-gradient-to-tl from-base-300/55 via-base-300/25 to-transparent blur-xl shadow-[inset_-2rem_-1.5rem_3rem_-1rem_rgba(0,0,0,0.35)]"></div>
+    <button class="btn btn-circle btn-error btn-md absolute -top-16 right-5 z-10 shadow-xl" type="button" aria-label="Emergency stop current run" title="Emergency stop" @click="cancelRun"><svg viewBox="0 0 24 24" aria-hidden="true" class="size-5 fill-current"><rect x="6" y="6" width="12" height="12" rx="1" /></svg></button>
+    <div class="flex justify-between gap-4 text-sm font-medium"><span class="truncate">{{ progress.label }}</span><span class="shrink-0">{{ progress.percent }}%</span></div>
+    <progress class="progress progress-primary mt-1 block w-full" :value="progress.percent" max="100"></progress>
+    <div class="mt-2 flex justify-between gap-4 text-xs text-base-content/70"><span class="truncate">{{ progress.sub_label }}</span><span class="shrink-0">{{ progress.sub_percent }}%</span></div>
+    <progress class="progress progress-accent mt-1 block w-full" :value="progress.sub_percent" max="100"></progress>
+    <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-base-content/60"><span v-for="(step, index) in progress.steps" :key="`${index}-${step}`">{{ step }}</span></div>
+  </div>
 </template>

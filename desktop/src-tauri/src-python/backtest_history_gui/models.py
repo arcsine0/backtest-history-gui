@@ -61,6 +61,14 @@ class FreqtradeExportRequest(StrategyFileRequest):
     destination: str
 
 
+class OptimizationGoal(BaseModel):
+    profile: str = "balanced"
+    target_trades_per_year: int = Field(default=100, ge=1, le=100000)
+    min_trades_per_test: int = Field(default=10, ge=1, le=10000)
+    max_drawdown_pct: float = Field(default=25, gt=0, le=100)
+    min_profit_factor: float = Field(default=1.1, ge=0, le=100)
+
+
 class FreqtradeBacktestRequest(BaseModel):
     strategy: StrategySetup
     config_path: str = ""
@@ -70,6 +78,8 @@ class FreqtradeBacktestRequest(BaseModel):
     timeframes: str
     timerange: str = ""
     hyperopt_epochs: int = Field(default=0, ge=0, le=10000)
+    validation_test_count: int = Field(default=10, ge=1, le=20)
+    optimization_goal: OptimizationGoal = Field(default_factory=OptimizationGoal)
 
 
 class ValidationSlice(BaseModel):
@@ -84,5 +94,8 @@ class ValidationRun(BaseModel):
     stability_score: float
     mean_return: float
     return_stddev: float
+    total_test_trades: int
+    minimum_test_trades: int
     coverage: str
     output: str
+    snapshot_path: str | None = None
