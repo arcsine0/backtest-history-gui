@@ -1,0 +1,1 @@
+"""Terminal signal node definitions."""
