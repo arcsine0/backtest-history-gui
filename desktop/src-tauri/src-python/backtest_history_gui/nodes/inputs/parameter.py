@@ -16,13 +16,34 @@ NODE = NodeDefinition(
             optimizable=False,
         ),
         Parameter(
-            "default", "decimal", 1.0, "Default value.", -1_000_000, 1_000_000, 4
+            "default",
+            "decimal",
+            1.0,
+            "Default value; its node minimum and maximum define the Hyperopt range.",
+            -1_000_000,
+            1_000_000,
+            4,
+            optimizable=False,
         ),
         Parameter(
-            "minimum", "decimal", 0.0, "Hyperopt minimum.", -1_000_000, 1_000_000, 4
+            "minimum",
+            "decimal",
+            0.0,
+            "Hyperopt minimum.",
+            -1_000_000,
+            1_000_000,
+            4,
+            optimizable=False,
         ),
         Parameter(
-            "maximum", "decimal", 2.0, "Hyperopt maximum.", -1_000_000, 1_000_000, 4
+            "maximum",
+            "decimal",
+            2.0,
+            "Hyperopt maximum.",
+            -1_000_000,
+            1_000_000,
+            4,
+            optimizable=False,
         ),
     ),
 )

@@ -10,6 +10,10 @@ from threading import Event, Lock
 from anyio.from_thread import start_blocking_portal
 from pytauri import Commands, builder_factory, context_factory
 
+from .ai_strategy import (
+    generate_strategy as generate_ai_strategy,
+    graph_from_payload,
+)
 from .freqtrade_runner import (
     RunCancelled,
     apply_parameter_file_to_source,
@@ -41,19 +45,23 @@ from .freqtrade_templates import (
 )
 from .models import (
     DEFAULT_WORKSPACE,
+    AiStrategyGraphRequest,
     PROJECT_ROOT,
     FreqtradeBacktestRequest,
     FreqtradeDataClearRequest,
     FreqtradeExportRequest,
     FreqtradeTemplateRequest,
+    RunLogExportRequest,
     StoredBacktest,
     StrategyFileRequest,
+    StrategyParameter,
     StrategyRun,
     StrategySetup,
     ValidationRun,
     ValidationSlice,
     WorkspaceRequest,
 )
+from .graph_compiler import compile_freqtrade_graph, graph_parameters
 from .nodes import node_catalog
 from .storage import (
     clear_freqtrade_results as clear_stored_freqtrade_results,
@@ -68,6 +76,7 @@ from .storage import (
     save_strategy,
     save_strategy_file,
     save_validation_file,
+    write_text_file,
 )
 
 commands: Commands = Commands()
@@ -216,6 +225,7 @@ def _refresh_studio_template(
     source, class_name = payload.get("strategy_source"), payload.get("class_name")
     if (
         payload.get("format") == "freqtrade-graph-v1"
+        and payload.get("template_id") != "ai_graph"
         and isinstance(payload.get("entry_id"), str)
         and isinstance(payload.get("exit_id"), str)
     ):
@@ -233,6 +243,27 @@ def _refresh_studio_template(
         )
         setup.parameters = refreshed.parameters
         payload["strategy_source"], payload["class_name"] = source, class_name
+    elif payload.get("format") == "freqtrade-graph-v1" and isinstance(
+        payload.get("graph"), dict
+    ):
+        if not isinstance(class_name, str):
+            raise ValueError("Graph strategy is missing its generated class name.")
+        graph = graph_from_payload(payload["graph"])
+        source = compile_freqtrade_graph(
+            graph,
+            class_name,
+            (timeframes.split(",", 1)[0].strip() or "5m"),
+            str(payload.get("entry_id") or "graph"),
+        )
+        setup.parameters = [
+            StrategyParameter(
+                name=parameter.name.upper(),
+                value=str(parameter.value),
+                notes=parameter.definition.description,
+            )
+            for parameter in graph_parameters(graph)
+        ]
+        payload["strategy_source"] = source
     if not isinstance(source, str) or not isinstance(class_name, str):
         raise ValueError("Create or load a Freqtrade template strategy first.")
     parameter_file = payload.get("parameter_file")
@@ -697,6 +728,30 @@ async def create_freqtrade_template(body: FreqtradeTemplateRequest) -> StrategyS
 
 
 @commands.command()
+async def create_ai_strategy(body: AiStrategyGraphRequest) -> StrategySetup:
+    _start_progress("Generating AI strategy")
+    try:
+        _set_progress(
+            "Preparing node catalog",
+            15,
+            "Sending the strategy brief and market context",
+        )
+        setup = await asyncio.to_thread(generate_ai_strategy, body)
+        _set_progress(
+            "Validating node graph",
+            80,
+            "Compiling the generated graph into a Freqtrade strategy",
+        )
+        saved = await asyncio.to_thread(
+            _with_database, lambda connection: save_strategy(connection, setup)
+        )
+        _set_progress("AI strategy ready", 100, "Saved the validated strategy", 100)
+        return saved
+    finally:
+        _finish_progress()
+
+
+@commands.command()
 async def run_freqtrade_backtest(body: FreqtradeBacktestRequest) -> StrategyRun:
     return await asyncio.to_thread(_run_freqtrade_backtest, body)
 
@@ -733,6 +788,11 @@ async def cancel_freqtrade_run() -> bool:
 @commands.command()
 async def export_freqtrade_strategy(body: FreqtradeExportRequest) -> str:
     return str(await asyncio.to_thread(export_strategy, body.path, body.destination))
+
+
+@commands.command()
+async def export_run_log(body: RunLogExportRequest) -> str:
+    return str(await asyncio.to_thread(write_text_file, body.destination, body.content))
 
 
 @commands.command()

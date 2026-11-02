@@ -34,6 +34,7 @@ storage = load("storage")
 templates = load("freqtrade_templates")
 snapshots = load("freqtrade_snapshot")
 runner = load("freqtrade_runner")
+ai_strategy = load("ai_strategy")
 from backtest_history_gui.nodes import (
     NODES,
     NodeCompileError,
@@ -42,6 +43,7 @@ from backtest_history_gui.nodes import (
 )
 from backtest_history_gui.graph_compiler import (
     compile_graph_fragments,
+    graph_parameters,
     topological_nodes,
 )
 from backtest_history_gui.graph_schema import GraphEdge, GraphNode, StrategyGraph
@@ -49,6 +51,87 @@ from backtest_history_gui.preset_graphs import PRESET_GRAPHS
 
 
 class FreqtradeStorageTests(unittest.TestCase):
+    def test_declared_input_parameter_uses_its_own_hyperopt_range(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode(
+                    "rsi_cap",
+                    "input.parameter",
+                    {
+                        "name": "PARAMETER",
+                        "default": 70,
+                        "minimum": 55,
+                        "maximum": 85,
+                    },
+                ),
+            ),
+            edges=(),
+        )
+        parameters = graph_parameters(graph)
+        self.assertEqual(len(parameters), 1)
+        self.assertEqual(parameters[0].name, "rsi_cap")
+        self.assertEqual(parameters[0].value, 70)
+        self.assertEqual(parameters[0].definition.minimum, 55)
+        self.assertEqual(parameters[0].definition.maximum, 85)
+
+    def test_ai_graph_envelope_is_normalized_and_compiled_before_persistence(self):
+        graph = next(iter(PRESET_GRAPHS.values()))()
+        envelope = {
+            "filename": "AI FVG Strategy.py",
+            "graph": {
+                "version": graph.version,
+                "nodes": [
+                    {
+                        "id": node.id,
+                        "type": node.type,
+                        "parameters": [
+                            {"key": key, "value": str(value).lower()}
+                            for key, value in node.parameters.items()
+                        ],
+                    }
+                    for node in graph.nodes
+                ],
+                "edges": [
+                    {
+                        "source_node": edge.source_node,
+                        "source_port": edge.source_port,
+                        "target_node": edge.target_node,
+                        "target_port": edge.target_port,
+                    }
+                    for edge in graph.edges
+                ],
+            },
+        }
+        setup = ai_strategy.strategy_from_envelope(
+            envelope,
+            models.AiStrategyGraphRequest(
+                prompt="Create an FVG strategy.",
+                workspace_path="data",
+                exchange="binance",
+                trading_mode="futures",
+                pairs="BTC/USDT:USDT",
+                timeframes="5m",
+            ),
+        )
+        self.assertTrue(setup.name.startswith("AI-FVG-Strategy-Futures-BTC-USDT-5m-"))
+        self.assertEqual(setup.template_id, "ai_graph")
+        self.assertEqual(setup.freqtrade_payload["ai"]["model"], "gpt-6-luna")
+        compile(setup.freqtrade_payload["strategy_source"], "<strategy>", "exec")
+
+    def test_saved_graph_payload_accepts_parameter_objects(self):
+        graph = PRESET_GRAPHS["fvg_atr"]()
+        restored = ai_strategy.graph_from_payload(json.loads(json.dumps(graph.as_dict())))
+        self.assertEqual(
+            [node.type for node in restored.nodes],
+            [node.type for node in graph.nodes],
+        )
+        self.assertEqual(
+            next(node for node in restored.nodes if node.id == "exit_trailing").parameters[
+                "trail_atr"
+            ],
+            2.5,
+        )
+
     def test_node_catalog_is_unique_serializable_and_exposes_indicator_parameters(self):
         catalog = node_catalog()
         json.dumps(catalog)
@@ -185,6 +268,15 @@ class FreqtradeStorageTests(unittest.TestCase):
             self.assertIn(
                 "class FVGATR(IStrategy):", setup.freqtrade_payload["strategy_source"]
             )
+            self.assertIn(
+                "isinstance(candle['node_exit_atr_value'], Real)",
+                setup.freqtrade_payload["strategy_source"],
+            )
+
+    def test_writes_exported_text_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = storage.write_text_file(Path(directory) / "logs" / "run.log", "run output")
+            self.assertEqual(target.read_text(encoding="utf-8"), "run output")
 
     def test_normalizes_freqtrade_result_to_existing_charts_contract(self):
         result = runner.normalise_result(

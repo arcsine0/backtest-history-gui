@@ -69,8 +69,23 @@ class FreqtradeTemplateRequest(BaseModel):
     timeframes: str = ""
 
 
+class AiStrategyGraphRequest(BaseModel):
+    prompt: str = Field(min_length=3, max_length=8000)
+    workspace_path: str = DEFAULT_WORKSPACE
+    exchange: str = "binance"
+    trading_mode: str = "futures"
+    pairs: str = ""
+    timeframes: str = ""
+    timerange: str = ""
+
+
 class FreqtradeExportRequest(StrategyFileRequest):
     destination: str
+
+
+class RunLogExportRequest(BaseModel):
+    destination: str
+    content: str
 
 
 class OptimizationGoal(BaseModel):

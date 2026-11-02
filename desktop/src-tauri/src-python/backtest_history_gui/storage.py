@@ -134,6 +134,13 @@ def save_validation_file(
     return setup
 
 
+def write_text_file(path: str | Path, content: str) -> Path:
+    destination = Path(path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(content, encoding="utf-8")
+    return destination.resolve()
+
+
 def load_strategy_file(path: Path) -> tuple[StrategySetup, StoredBacktest]:
     if not path.is_file():
         raise ValueError("Strategy save file was not found.")

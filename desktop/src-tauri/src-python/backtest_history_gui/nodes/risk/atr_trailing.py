@@ -26,6 +26,8 @@ NODE = NodeDefinition(
 
 def compile_node(context):
     context.require_import("from freqtrade.strategy import stoploss_from_absolute")
+    context.require_import("from numbers import Real")
+    context.require_import("import math")
     trade, atr = context.input("trade"), context.input("atr")
     activation, trail = (
         context.parameter("activation_atr"),
@@ -33,6 +35,6 @@ def compile_node(context):
     )
     context.bind_output(
         "stoploss",
-        f"stoploss_from_absolute({trade}.max_rate - ({atr} * {trail}), current_rate, is_short={trade}.is_short) if {trade}.max_rate >= {trade}.open_rate + ({atr} * {activation}) else None",
+        f"stoploss_from_absolute({trade}.max_rate - ({atr} * {trail}), current_rate, is_short={trade}.is_short) if (isinstance(current_rate, Real) and current_rate > 0 and isinstance({trade}.max_rate, Real) and isinstance({trade}.open_rate, Real) and isinstance({atr}, Real) and math.isfinite({atr}) and {trade}.max_rate >= {trade}.open_rate + ({atr} * {activation})) else None",
     )
     return context.finalize()

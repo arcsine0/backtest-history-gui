@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import import_module
 
 from .graph_schema import GraphEdge, StrategyGraph
@@ -65,6 +65,9 @@ def graph_parameters(graph: StrategyGraph) -> tuple[GraphParameter, ...]:
             if definition.group == "risk" or node.id.startswith("exit_")
             else "enter"
         )
+        if node.type == "input.parameter":
+            parameters.append(_declared_input_parameter(node, definition, space))
+            continue
         for parameter in definition.parameters:
             if parameter.optimizable:
                 parameters.append(
@@ -78,6 +81,26 @@ def graph_parameters(graph: StrategyGraph) -> tuple[GraphParameter, ...]:
                     )
                 )
     return tuple(parameters)
+
+
+def _declared_input_parameter(node, definition, space: str) -> GraphParameter:
+    """Use an input.parameter node's local bounds for one real Hyperopt value."""
+    fields = {parameter.key: parameter for parameter in definition.parameters}
+    default = float(node.parameters.get("default", fields["default"].default))
+    minimum = float(node.parameters.get("minimum", fields["minimum"].default))
+    maximum = float(node.parameters.get("maximum", fields["maximum"].default))
+    if minimum > maximum:
+        raise GraphCompileError(f"{node.id} minimum cannot exceed maximum.")
+    if not minimum <= default <= maximum:
+        raise GraphCompileError(f"{node.id} default must be within its Hyperopt range.")
+    parameter = replace(
+        fields["default"],
+        default=default,
+        minimum=minimum,
+        maximum=maximum,
+        optimizable=True,
+    )
+    return GraphParameter(node.id, node.id, "default", parameter, default, space)
 
 
 def compile_graph_fragments(

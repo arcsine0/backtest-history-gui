@@ -73,7 +73,13 @@ function portsFor(node: GraphNode, direction: "input" | "output") {
   return uniquePorts([...declared, ...connected]);
 }
 
-function parametersFor(node: GraphNode) {
+function parameterValue(value: unknown, fallback: string | number | boolean) {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+    ? value
+    : fallback;
+}
+
+function parametersFor(node: GraphNode): ResolvedParameter[] {
   const definition = definitions.value.get(node.type);
   const declared = definition?.parameters ?? [];
   const declaredKeys = new Set(declared.map((parameter) => parameter.key));
@@ -87,7 +93,10 @@ function parametersFor(node: GraphNode) {
       value,
     }) as ResolvedParameter);
   return [
-    ...declared.map((parameter) => ({ ...parameter, value: node.parameters?.[parameter.key] ?? parameter.default })),
+    ...declared.map((parameter): ResolvedParameter => ({
+      ...parameter,
+      value: parameterValue(node.parameters?.[parameter.key], parameter.default),
+    })),
     ...undeclared,
   ];
 }
