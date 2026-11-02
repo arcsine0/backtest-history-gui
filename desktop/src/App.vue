@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { pyInvoke } from "tauri-plugin-pytauri-api";
 import EquityChart from "./components/EquityChart.vue";
+import StrategyGraph from "./components/StrategyGraph.vue";
 
 type Parameter = { name: string; value: string; notes: string; enabled: boolean; locked: boolean };
 type Strategy = { id?: number; name: string; source: string; workspace_path: string; template_id: string; parameters: Parameter[]; freqtrade_payload?: Record<string, unknown>; strategy_file?: string | null };
@@ -17,11 +18,42 @@ type ClearKind = "backtests" | "hyperopts" | "validations";
 type Template = { id: string; label: string; entry_id: string; exit_id: string };
 type StrategyComponent = { id: string; label: string; file_label: string; description: string };
 type SortDirection = "asc" | "desc" | null;
+type StrategyGraphSchema = {
+  version: number;
+  nodes: { id: string; type: string; parameters?: Record<string, unknown> }[];
+  edges: { source_node: string; source_port: string; target_node: string; target_port: string }[];
+};
+type StrategyNodePort = { key: string; value_type: string; required?: boolean; description?: string };
+type StrategyNodeParameter = {
+  key: string;
+  value_type: "integer" | "decimal" | "boolean" | "choice";
+  default: string | number | boolean;
+  description: string;
+  minimum?: number | null;
+  maximum?: number | null;
+  decimals?: number | null;
+  choices?: string[];
+  optimizable?: boolean;
+};
+type StrategyNodeCatalog = {
+  version: number;
+  nodes: {
+    id: string;
+    group: string;
+    label: string;
+    description: string;
+    inputs: StrategyNodePort[];
+    outputs: StrategyNodePort[];
+    parameters: StrategyNodeParameter[];
+  }[];
+};
+type ParameterView = "parameters" | "nodes" | "json";
 
 const strategy = ref<Strategy>({ name: "", source: "", workspace_path: "", template_id: "fvg_atr", parameters: [] });
 const templates = ref<Template[]>([]);
 const entries = ref<StrategyComponent[]>([]);
 const exits = ref<StrategyComponent[]>([]);
+const nodeCatalog = ref<StrategyNodeCatalog>({ version: 1, nodes: [] });
 const entryId = ref("fvg");
 const exitId = ref("atr_trailing");
 const history = ref<Backtest[]>([]);
@@ -68,6 +100,17 @@ const page = ref(1);
 const perPage = 25;
 const nameClock = ref(Date.now());
 let nameClockTimer: number | undefined;
+const parameterView = ref<ParameterView>("parameters");
+
+const strategyGraph = computed<StrategyGraphSchema | null>(() => {
+  const graph = strategy.value.freqtrade_payload?.graph;
+  if (!graph || typeof graph !== "object") return null;
+  const candidate = graph as Partial<StrategyGraphSchema>;
+  return Array.isArray(candidate.nodes) && Array.isArray(candidate.edges) ? candidate as StrategyGraphSchema : null;
+});
+const strategyGraphJson = computed(() =>
+  strategyGraph.value ? JSON.stringify(strategyGraph.value, null, 2) : "No node graph is available for this strategy.",
+);
 
 function generatedName(now = new Date()) {
   const entry = entries.value.find((item) => item.id === entryId.value)?.file_label || "Entry";
@@ -118,14 +161,15 @@ async function cancelRun() {
 }
 
 async function refresh() {
-  const [workspace, savedTemplates, savedEntries, savedExits, savedHistory] = await Promise.all([
-    call<string>("default_workspace"), call<Template[]>("list_freqtrade_templates"), call<StrategyComponent[]>("list_freqtrade_entries"), call<StrategyComponent[]>("list_freqtrade_exits"), call<Backtest[]>("list_imported_backtests"),
+  const [workspace, savedTemplates, savedEntries, savedExits, savedHistory, savedNodeCatalog] = await Promise.all([
+    call<string>("default_workspace"), call<Template[]>("list_freqtrade_templates"), call<StrategyComponent[]>("list_freqtrade_entries"), call<StrategyComponent[]>("list_freqtrade_exits"), call<Backtest[]>("list_imported_backtests"), call<StrategyNodeCatalog>("get_strategy_node_catalog"),
   ]);
   if (!strategy.value.workspace_path) strategy.value.workspace_path = workspace;
   templates.value = savedTemplates;
   entries.value = savedEntries;
   exits.value = savedExits;
   history.value = savedHistory;
+  nodeCatalog.value = savedNodeCatalog;
   datasets.value = await call<Dataset[]>("list_freqtrade_datasets", { workspace_path: strategy.value.workspace_path });
 }
 
@@ -312,7 +356,25 @@ onBeforeUnmount(() => {
         </div>
         <div class="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-5"><fieldset class="fieldset"><legend class="fieldset-legend">Exchange</legend><input v-model="exchange" class="input w-full" placeholder="binance" /></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Market type</legend><select v-model="tradingMode" class="select w-full"><option value="futures">Futures</option><option value="spot">Spot</option><option value="margin">Margin</option></select></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Pairs</legend><input v-model="pairs" class="input w-full" placeholder="BTC/USDT:USDT" /><p class="label">Comma-separated.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Timeframes</legend><input v-model="timeframes" class="input w-full" placeholder="5m,1h" /><p class="label">Comma-separated.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Timerange</legend><input v-model="timerange" class="input w-full" placeholder="20260101-20261231" /></fieldset></div>
         <div class="mt-3 flex flex-wrap items-end gap-3"><button class="btn btn-secondary" :disabled="busy" @click="createTemplate">Create</button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run()"><span>Run Backtest</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
-        <div v-if="strategy.parameters.length" class="mt-4"><h3 class="font-medium">Template parameters</h3><div class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"><div v-for="parameter in strategy.parameters" :key="parameter.name" class="rounded-box border border-base-300 p-3"><div class="font-medium">{{ parameter.name }}</div><div class="text-sm text-base-content/70">{{ parameter.value }} · {{ parameter.notes }}</div></div></div></div>
+        <div v-if="strategy.parameters.length" class="mt-4">
+          <div class="flex items-center justify-between gap-3">
+            <h3 class="font-medium">Template parameters</h3>
+            <label class="sr-only" for="template-parameter-view">Template parameter view</label>
+            <select id="template-parameter-view" v-model="parameterView" class="select select-sm">
+              <option value="parameters">Parameters</option>
+              <option value="nodes">Nodes</option>
+              <option value="json">JSON</option>
+            </select>
+          </div>
+          <div v-if="parameterView === 'parameters'" class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <div v-for="parameter in strategy.parameters" :key="parameter.name" class="rounded-box border border-base-300 p-3">
+              <div class="font-medium">{{ parameter.name }}</div>
+              <div class="text-sm text-base-content/70">{{ parameter.value }} · {{ parameter.notes }}</div>
+            </div>
+          </div>
+          <StrategyGraph v-else-if="parameterView === 'nodes' && strategyGraph" class="mt-2" :graph="strategyGraph" :catalog="nodeCatalog.nodes" />
+          <pre v-else class="mt-2 max-h-[32rem] overflow-auto rounded-box border border-base-300 bg-base-100 p-4 text-xs text-base-content/80">{{ strategyGraphJson }}</pre>
+        </div>
         <div class="mt-4 flex flex-wrap gap-2"><button class="btn btn-sm" @click="chooseSnapshot">Load</button><button class="btn btn-sm" :disabled="!strategy.strategy_file" @click="exportStrategy">Export</button></div>
       </div></section>
       <section v-else-if="activeTab === 'optimizer'" class="card bg-base-200"><div class="card-body"><h2 class="card-title">Hyperopt optimizer</h2><p class="text-sm text-base-content/70">Hyperopt refreshes the Builder market data first, then evaluates the deterministic template parameter ranges.</p>

@@ -54,6 +54,7 @@ from .models import (
     ValidationSlice,
     WorkspaceRequest,
 )
+from .nodes import node_catalog
 from .storage import (
     clear_freqtrade_results as clear_stored_freqtrade_results,
     import_backtest,
@@ -670,6 +671,11 @@ async def list_freqtrade_entries() -> list[dict]:
 @commands.command()
 async def list_freqtrade_exits() -> list[dict]:
     return list_exits()
+
+
+@commands.command()
+async def get_strategy_node_catalog() -> dict:
+    return node_catalog()
 
 
 @commands.command()
