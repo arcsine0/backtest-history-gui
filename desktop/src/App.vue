@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { pyInvoke } from "tauri-plugin-pytauri-api";
 import EquityChart from "./components/EquityChart.vue";
+import PathInput from "./components/PathInput.vue";
 import StrategyGraph from "./components/StrategyGraph.vue";
 
 type Parameter = { name: string; value: string; notes: string; enabled: boolean; locked: boolean };
@@ -48,6 +49,7 @@ type StrategyNodeCatalog = {
   }[];
 };
 type ParameterView = "parameters" | "nodes" | "json";
+type CreationMode = "manual" | "ai";
 
 const strategy = ref<Strategy>({ name: "", source: "", workspace_path: "", template_id: "fvg_atr", parameters: [] });
 const templates = ref<Template[]>([]);
@@ -88,6 +90,7 @@ const output = ref("");
 const error = ref("");
 const busy = ref(false);
 const activeTab = ref<"builder" | "optimizer" | "validation" | "settings">("builder");
+const creationMode = ref<CreationMode>("manual");
 const clearingKind = ref("");
 const pendingClearKind = ref<ClearKind | null>(null);
 const validation = ref<ValidationRun | null>(null);
@@ -226,6 +229,11 @@ async function chooseConfig() {
   if (typeof path === "string") configPath.value = path;
 }
 
+async function chooseWorkspace() {
+  const path = await open({ defaultPath: strategy.value.workspace_path, directory: true, multiple: false });
+  if (typeof path === "string") strategy.value.workspace_path = path;
+}
+
 function serializableStrategy() {
   return JSON.parse(JSON.stringify(strategy.value)) as Strategy;
 }
@@ -334,28 +342,104 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="min-h-screen bg-base-300 px-4 py-8 sm:px-8">
+  <div class="min-h-screen bg-base-300">
+    <aside class="fixed inset-y-0 left-0 z-40 flex w-14 flex-col border-r border-base-300 bg-base-200 py-4">
+      <nav class="flex flex-col items-center gap-2" aria-label="Studio workflow">
+        <div class="group relative">
+          <button class="btn btn-square btn-ghost btn-sm" :class="activeTab === 'builder' ? 'btn-active' : ''" type="button" aria-label="Builder" @click="activeTab = 'builder'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 20h16M6 16l4-4 3 3 5-7" /></svg>
+          </button>
+          <span role="tooltip" class="pointer-events-none absolute top-1/2 left-full z-50 ml-2 -translate-x-2 -translate-y-1/2 whitespace-nowrap rounded-box bg-neutral px-2 py-1 text-xs text-neutral-content opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100">Builder</span>
+        </div>
+        <div class="group relative">
+          <button class="btn btn-square btn-ghost btn-sm" :class="activeTab === 'optimizer' ? 'btn-active' : ''" type="button" aria-label="Optimizer" @click="activeTab = 'optimizer'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 6h16M4 12h10M4 18h6" /><circle cx="17" cy="12" r="2" /><circle cx="13" cy="18" r="2" /></svg>
+          </button>
+          <span role="tooltip" class="pointer-events-none absolute top-1/2 left-full z-50 ml-2 -translate-x-2 -translate-y-1/2 whitespace-nowrap rounded-box bg-neutral px-2 py-1 text-xs text-neutral-content opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100">Optimizer</span>
+        </div>
+        <div class="group relative">
+          <button class="btn btn-square btn-ghost btn-sm" :class="activeTab === 'validation' ? 'btn-active' : ''" type="button" aria-label="Validation" @click="activeTab = 'validation'">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M12 3v18M3 12h18" /><path d="m7 16 3-3 2 2 5-6" /></svg>
+          </button>
+          <span role="tooltip" class="pointer-events-none absolute top-1/2 left-full z-50 ml-2 -translate-x-2 -translate-y-1/2 whitespace-nowrap rounded-box bg-neutral px-2 py-1 text-xs text-neutral-content opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100">Validation</span>
+        </div>
+        <div class="group relative">
+          <button class="btn btn-square btn-ghost btn-sm" :class="activeTab === 'settings' ? 'btn-active' : ''" type="button" aria-label="Settings" @click="openSettings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.1 2.1-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.09A1.7 1.7 0 0 0 10.68 18.35a1.7 1.7 0 0 0-1.88.34l-.06.06-2.1-2.1.06-.06A1.7 1.7 0 0 0 7.04 14.7 1.7 1.7 0 0 0 5.48 13.66H5.4v-3h.08a1.7 1.7 0 0 0 1.56-1.04A1.7 1.7 0 0 0 6.7 7.74l-.06-.06 2.1-2.1.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 11.72 4.42v-.08h3v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.1 2.1-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.08v3h-.08A1.7 1.7 0 0 0 19.4 15Z" /></svg>
+          </button>
+          <span role="tooltip" class="pointer-events-none absolute top-1/2 left-full z-50 ml-2 -translate-x-2 -translate-y-1/2 whitespace-nowrap rounded-box bg-neutral px-2 py-1 text-xs text-neutral-content opacity-0 transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:translate-x-0 group-focus-within:opacity-100">Settings</span>
+        </div>
+      </nav>
+    </aside>
+    <main class="ml-14 min-h-screen px-4 py-8 sm:px-8">
     <section class="mx-auto max-w-6xl space-y-5">
       <header><p class="text-sm text-base-content/60">Local Freqtrade strategy studio</p><h1 class="text-3xl font-semibold">Backtest Studio</h1><p class="mt-1 text-base-content/70">Create deterministic strategies, run native Freqtrade backtests and hyperopt, then export portable snapshots.</p></header>
       <div v-if="error" role="alert" class="alert alert-error"><span>{{ error }}</span></div>
-      <div role="tablist" class="tabs tabs-box w-fit" aria-label="Studio workflow">
-        <button role="tab" class="tab gap-2" :class="activeTab === 'builder' ? 'tab-active' : ''" :aria-selected="activeTab === 'builder'" @click="activeTab = 'builder'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 20h16M6 16l4-4 3 3 5-7" /></svg>Builder</button>
-        <button role="tab" class="tab gap-2" :class="activeTab === 'optimizer' ? 'tab-active' : ''" :aria-selected="activeTab === 'optimizer'" @click="activeTab = 'optimizer'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 6h16M4 12h10M4 18h6" /><circle cx="17" cy="12" r="2" /><circle cx="13" cy="18" r="2" /></svg>Optimizer</button>
-        <button role="tab" class="tab gap-2" :class="activeTab === 'validation' ? 'tab-active' : ''" :aria-selected="activeTab === 'validation'" @click="activeTab = 'validation'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M12 3v18M3 12h18" /><path d="m7 16 3-3 2 2 5-6" /></svg>Validation</button>
-        <button role="tab" class="tab gap-2" :class="activeTab === 'settings' ? 'tab-active' : ''" :aria-selected="activeTab === 'settings'" @click="openSettings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.1 2.1-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.09A1.7 1.7 0 0 0 10.68 18.35a1.7 1.7 0 0 0-1.88.34l-.06.06-2.1-2.1.06-.06A1.7 1.7 0 0 0 7.04 14.7 1.7 1.7 0 0 0 5.48 13.66H5.4v-3h.08a1.7 1.7 0 0 0 1.56-1.04A1.7 1.7 0 0 0 6.7 7.74l-.06-.06 2.1-2.1.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 11.72 4.42v-.08h3v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.1 2.1-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.08v3h-.08A1.7 1.7 0 0 0 19.4 15Z" /></svg>Settings</button>
-      </div>
-      <section v-if="activeTab === 'builder'" class="card bg-base-200"><div class="card-body"><h2 class="card-title">Strategy builder</h2>
-        <div class="grid gap-3 md:grid-cols-2">
-          <fieldset class="fieldset"><legend class="fieldset-legend">Name</legend><input v-model="strategy.name" class="input w-full" :placeholder="generatedNamePreview" /></fieldset>
-          <fieldset class="fieldset"><legend class="fieldset-legend">Workspace</legend><input v-model="strategy.workspace_path" class="input w-full" /><p class="label">SQLite snapshots and generated strategy files stay here.</p></fieldset>
-          <fieldset class="fieldset"><legend class="fieldset-legend">Preset pairing</legend><select v-model="strategy.template_id" class="select w-full" @change="applyPreset"><option value="custom">Custom selection</option><option v-for="item in templates" :key="item.id" :value="item.id">{{ item.label }}</option></select></fieldset>
-          <fieldset class="fieldset"><legend class="fieldset-legend">Freqtrade config (optional)</legend><div class="join w-full"><input v-model="configPath" class="input join-item w-full" placeholder="config.json" /><button class="btn join-item" @click="chooseConfig">Choose</button></div><p class="label">An empty field creates a safe local dry-run config.</p></fieldset>
-          <fieldset class="fieldset"><legend class="fieldset-legend">Entry</legend><select v-model="entryId" class="select w-full" @change="syncPreset"><option v-for="item in entries" :key="item.id" :value="item.id">{{ item.label }}</option></select><p class="label">{{ entries.find((item) => item.id === entryId)?.description }}</p></fieldset>
-          <fieldset class="fieldset"><legend class="fieldset-legend">Exit</legend><select v-model="exitId" class="select w-full" @change="syncPreset"><option v-for="item in exits" :key="item.id" :value="item.id">{{ item.label }}</option></select><p class="label">{{ exits.find((item) => item.id === exitId)?.description }}</p></fieldset>
-          <fieldset class="fieldset md:col-span-2"><legend class="fieldset-legend">Logic brief — retained for a future AI layer</legend><textarea v-model="strategy.source" class="textarea h-24 w-full" placeholder="This does not alter the deterministic template or its parameters yet." /></fieldset>
-        </div>
+      <section v-if="activeTab === 'builder'" class="card bg-base-200">
+        <div class="card-body">
+          <h2 class="card-title">Strategy builder</h2>
+          <div class="mt-4 flex items-center justify-between gap-3">
+            <div role="tablist" class="tabs tabs-box w-fit" aria-label="Strategy creation mode">
+              <button role="tab" class="tab gap-2" :class="creationMode === 'manual' ? 'tab-active' : ''" :aria-selected="creationMode === 'manual'" @click="creationMode = 'manual'">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 20h16M6 16l4-4 3 3 5-7" /></svg>
+                Manual
+              </button>
+              <button role="tab" class="tab gap-2" :class="creationMode === 'ai' ? 'tab-active' : ''" :aria-selected="creationMode === 'ai'" @click="creationMode = 'ai'">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M12 3v18M3 12h18" /><path d="m7 16 3-3 2 2 5-6" /></svg>
+                AI
+              </button>
+            </div>
+            <div class="flex shrink-0 gap-2">
+              <button class="btn btn-square btn-sm" type="button" aria-label="Load strategy snapshot" title="Load strategy snapshot" @click="chooseSnapshot">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M4 19.5V6.75A1.75 1.75 0 0 1 5.75 5h4l1.5 2h7A1.75 1.75 0 0 1 20 8.75V19.5" /><path d="M4 19.5h16" /><path d="M12 10v7m0-7-3 3m3-3 3 3" /></svg>
+              </button>
+              <button class="btn btn-square btn-sm" type="button" :disabled="!strategy.strategy_file" aria-label="Export strategy" title="Export strategy" @click="exportStrategy">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" class="size-4"><path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" /><path d="M12 3v12m0 0-4-4m4 4 4-4" /><path d="M8 21h8" /></svg>
+              </button>
+            </div>
+          </div>
+          <div class="mt-4 grid gap-3 lg:grid-cols-3">
+            <fieldset class="fieldset">
+              <legend class="fieldset-legend">Name</legend>
+              <input v-model="strategy.name" class="input w-full" :placeholder="generatedNamePreview" />
+            </fieldset>
+            <PathInput
+              v-model="strategy.workspace_path"
+              label="Workspace"
+              help="SQLite snapshots and generated strategy files stay here."
+              browse-label="Choose workspace folder"
+              @browse="chooseWorkspace"
+            />
+            <PathInput
+              v-model="configPath"
+              label="Freqtrade config (optional)"
+              placeholder="config.json"
+              help="An empty field creates a safe local dry-run config."
+              browse-label="Choose Freqtrade config"
+              @browse="chooseConfig"
+            />
+            <fieldset v-if="creationMode === 'manual'" class="fieldset lg:col-start-1 lg:row-start-2">
+              <legend class="fieldset-legend">Preset pairing</legend>
+              <select v-model="strategy.template_id" class="select w-full" @change="applyPreset"><option value="custom">Custom selection</option><option v-for="item in templates" :key="item.id" :value="item.id">{{ item.label }}</option></select>
+            </fieldset>
+            <fieldset v-if="creationMode === 'manual'" class="fieldset lg:col-start-2 lg:row-start-2">
+              <legend class="fieldset-legend">Entry</legend>
+              <select v-model="entryId" class="select w-full" @change="syncPreset"><option v-for="item in entries" :key="item.id" :value="item.id">{{ item.label }}</option></select>
+              <p class="label">{{ entries.find((item) => item.id === entryId)?.description }}</p>
+            </fieldset>
+            <fieldset v-if="creationMode === 'manual'" class="fieldset lg:col-start-3 lg:row-start-2">
+              <legend class="fieldset-legend">Exit</legend>
+              <select v-model="exitId" class="select w-full" @change="syncPreset"><option v-for="item in exits" :key="item.id" :value="item.id">{{ item.label }}</option></select>
+              <p class="label">{{ exits.find((item) => item.id === exitId)?.description }}</p>
+            </fieldset>
+            <fieldset v-else class="fieldset lg:col-span-3 lg:row-start-2">
+              <legend class="fieldset-legend">Logic brief</legend>
+              <textarea v-model="strategy.source" class="textarea h-28 w-full" placeholder="Describe the strategy logic the AI should compose from the node catalog." />
+              <p class="label">AI strategy creation will be connected to the validated node catalog next.</p>
+            </fieldset>
+          </div>
         <div class="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-5"><fieldset class="fieldset"><legend class="fieldset-legend">Exchange</legend><input v-model="exchange" class="input w-full" placeholder="binance" /></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Market type</legend><select v-model="tradingMode" class="select w-full"><option value="futures">Futures</option><option value="spot">Spot</option><option value="margin">Margin</option></select></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Pairs</legend><input v-model="pairs" class="input w-full" placeholder="BTC/USDT:USDT" /><p class="label">Comma-separated.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Timeframes</legend><input v-model="timeframes" class="input w-full" placeholder="5m,1h" /><p class="label">Comma-separated.</p></fieldset><fieldset class="fieldset"><legend class="fieldset-legend">Timerange</legend><input v-model="timerange" class="input w-full" placeholder="20260101-20261231" /></fieldset></div>
-        <div class="mt-3 flex flex-wrap items-end gap-3"><button class="btn btn-secondary" :disabled="busy" @click="createTemplate">Create</button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run()"><span>Run Backtest</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
+        <div v-if="creationMode === 'manual'" class="mt-3 flex flex-wrap items-end gap-3"><button class="btn btn-secondary" :disabled="busy" @click="createTemplate">Create</button><button class="btn btn-primary" :disabled="busy || !strategy.parameters.length" @click="run()"><span>Run Backtest</span><span v-if="busy" class="loading loading-spinner loading-sm"></span></button></div>
         <div v-if="strategy.parameters.length" class="mt-4">
           <div class="flex items-center justify-between gap-3">
             <h3 class="font-medium">Template parameters</h3>
@@ -375,7 +459,6 @@ onBeforeUnmount(() => {
           <StrategyGraph v-else-if="parameterView === 'nodes' && strategyGraph" class="mt-2" :graph="strategyGraph" :catalog="nodeCatalog.nodes" />
           <pre v-else class="mt-2 max-h-[32rem] overflow-auto rounded-box border border-base-300 bg-base-100 p-4 text-xs text-base-content/80">{{ strategyGraphJson }}</pre>
         </div>
-        <div class="mt-4 flex flex-wrap gap-2"><button class="btn btn-sm" @click="chooseSnapshot">Load</button><button class="btn btn-sm" :disabled="!strategy.strategy_file" @click="exportStrategy">Export</button></div>
       </div></section>
       <section v-else-if="activeTab === 'optimizer'" class="card bg-base-200"><div class="card-body"><h2 class="card-title">Hyperopt optimizer</h2><p class="text-sm text-base-content/70">Hyperopt refreshes the Builder market data first, then evaluates the deterministic template parameter ranges.</p>
         <div class="mt-3 grid gap-3 md:grid-cols-2"><fieldset class="fieldset"><legend class="fieldset-legend">Hyperopt epochs</legend><input v-model.number="epochs" type="number" min="1" max="10000" class="input w-full" /><p class="label">Higher values explore more parameter combinations.</p></fieldset><div class="rounded-box border border-base-300 p-4"><div class="text-sm text-base-content/60">Current run context</div><div class="mt-1 font-medium">{{ strategy.name || 'Create a template in Builder' }}</div><div class="mt-1 text-sm text-base-content/70">{{ exchange }} · {{ tradingMode }} · {{ pairs }} · {{ timeframes }}<span v-if="timerange"> · {{ timerange }}</span></div></div></div>
@@ -402,6 +485,7 @@ onBeforeUnmount(() => {
       </template>
     </section>
   </main>
+  </div>
   <dialog class="modal" :open="pendingClearKind !== null" @cancel.prevent="pendingClearKind = null">
     <div class="modal-box border border-error/50">
       <h3 class="text-lg font-bold text-error">Clear {{ pendingClearKind }}?</h3>
