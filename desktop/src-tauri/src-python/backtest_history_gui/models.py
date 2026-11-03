@@ -79,6 +79,10 @@ class AiStrategyGraphRequest(BaseModel):
     timerange: str = ""
 
 
+class OpenAiApiKeyRequest(BaseModel):
+    api_key: str = Field(min_length=1, max_length=1000)
+
+
 class FreqtradeExportRequest(StrategyFileRequest):
     destination: str
 

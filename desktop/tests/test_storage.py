@@ -278,6 +278,15 @@ class FreqtradeStorageTests(unittest.TestCase):
             target = storage.write_text_file(Path(directory) / "logs" / "run.log", "run output")
             self.assertEqual(target.read_text(encoding="utf-8"), "run output")
 
+    def test_caches_openai_key_outside_strategy_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "cache" / "settings.sqlite3"
+            self.assertEqual(storage.cached_openai_api_key(cache), "")
+            storage.save_cached_openai_api_key("test-key", cache)
+            self.assertEqual(storage.cached_openai_api_key(cache), "test-key")
+            storage.clear_cached_openai_api_key(cache)
+            self.assertEqual(storage.cached_openai_api_key(cache), "")
+
     def test_normalizes_freqtrade_result_to_existing_charts_contract(self):
         result = runner.normalise_result(
             {

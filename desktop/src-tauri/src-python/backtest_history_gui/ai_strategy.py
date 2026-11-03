@@ -19,6 +19,7 @@ from .models import (
     StrategySetup,
 )
 from .nodes import node_by_id, node_catalog
+from .storage import cached_openai_api_key
 
 MODEL = "gpt-6-luna"
 REASONING_EFFORT = "low"
@@ -89,10 +90,11 @@ _OUTPUT_SCHEMA = {
 
 def generate_strategy(request: AiStrategyGraphRequest) -> StrategySetup:
     """Ask OpenAI for a graph envelope, then validate and compile it locally."""
-    _load_environment()
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = _openai_api_key()
     if not api_key:
-        raise ValueError("OPENAI_API_KEY is required to generate an AI strategy.")
+        raise ValueError(
+            "Configure an OpenAI API key in Settings or set OPENAI_API_KEY."
+        )
     try:
         from openai import OpenAI
     except ImportError as error:
@@ -131,6 +133,24 @@ def _load_environment() -> None:
     except ImportError:
         return
     load_dotenv(Path(PROJECT_ROOT) / ".env", override=False)
+
+
+def _openai_api_key() -> str:
+    _load_environment()
+    return os.environ.get("OPENAI_API_KEY", "").strip() or cached_openai_api_key().strip()
+
+
+def openai_api_key_status() -> dict[str, str | bool]:
+    """Report configuration only; never expose the local secret to the UI."""
+    _load_environment()
+    environment_configured = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    cache_configured = bool(cached_openai_api_key().strip())
+    return {
+        "configured": environment_configured or cache_configured,
+        "source": "environment" if environment_configured else "local cache" if cache_configured else "",
+        "cache_configured": cache_configured,
+        "environment_configured": environment_configured,
+    }
 
 
 def strategy_from_envelope(

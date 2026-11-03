@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS validation_runs (
 );
 """
 
+APP_SETTINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+OPENAI_API_KEY_SETTING = "openai_api_key"
+
 
 def open_database(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +52,50 @@ def open_database(path: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.executescript(SCHEMA)
     return connection
+
+
+def _settings_database(path: Path | None = None) -> sqlite3.Connection:
+    cache_root = Path(
+        os.environ.get("LOCALAPPDATA") or Path.home() / ".cache"
+    ) / "Stratara"
+    settings_path = path or cache_root / "settings.sqlite3"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(settings_path)
+    connection.execute(APP_SETTINGS_SCHEMA)
+    return connection
+
+
+def cached_openai_api_key(path: Path | None = None) -> str:
+    connection = _settings_database(path)
+    try:
+        row = connection.execute(
+            "SELECT value FROM app_settings WHERE key=?", (OPENAI_API_KEY_SETTING,)
+        ).fetchone()
+        return str(row[0]) if row else ""
+    finally:
+        connection.close()
+
+
+def save_cached_openai_api_key(api_key: str, path: Path | None = None) -> None:
+    connection = _settings_database(path)
+    try:
+        connection.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (OPENAI_API_KEY_SETTING, api_key),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def clear_cached_openai_api_key(path: Path | None = None) -> None:
+    connection = _settings_database(path)
+    try:
+        connection.execute("DELETE FROM app_settings WHERE key=?", (OPENAI_API_KEY_SETTING,))
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def save_strategy(

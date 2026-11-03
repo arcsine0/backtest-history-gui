@@ -13,6 +13,7 @@ from pytauri import Commands, builder_factory, context_factory
 from .ai_strategy import (
     generate_strategy as generate_ai_strategy,
     graph_from_payload,
+    openai_api_key_status,
 )
 from .freqtrade_runner import (
     RunCancelled,
@@ -51,6 +52,7 @@ from .models import (
     FreqtradeDataClearRequest,
     FreqtradeExportRequest,
     FreqtradeTemplateRequest,
+    OpenAiApiKeyRequest,
     RunLogExportRequest,
     StoredBacktest,
     StrategyFileRequest,
@@ -76,6 +78,8 @@ from .storage import (
     save_strategy,
     save_strategy_file,
     save_validation_file,
+    clear_cached_openai_api_key,
+    save_cached_openai_api_key,
     write_text_file,
 )
 
@@ -90,7 +94,9 @@ RUN_PROGRESS = {
     "sub_label": "",
     "sub_percent": 0,
     "steps": [],
+    "output": "",
 }
+RUN_LOG_LIMIT = 20_000
 
 
 def _start_progress(label: str) -> None:
@@ -103,6 +109,7 @@ def _start_progress(label: str) -> None:
             sub_label="Preparing",
             sub_percent=0,
             steps=[label],
+            output=f"[{label}] Preparing\n",
         )
 
 
@@ -110,16 +117,36 @@ def _set_progress(
     label: str, percent: int, sub_label: str = "Preparing", sub_percent: int = 0
 ) -> None:
     with RUN_PROGRESS_LOCK:
+        is_new_step = RUN_PROGRESS["label"] != label
         if not RUN_PROGRESS["steps"] or RUN_PROGRESS["steps"][-1] != label:
             RUN_PROGRESS["steps"].append(label)
         RUN_PROGRESS.update(
-            label=label, percent=percent, sub_label=sub_label, sub_percent=sub_percent
+            label=label,
+            percent=percent,
+            sub_label=sub_label,
+            sub_percent=sub_percent,
+            output=(
+                RUN_PROGRESS["output"]
+                + (f"[{label}] {sub_label}\n" if is_new_step else "")
+            )[-RUN_LOG_LIMIT:],
         )
 
 
 def _set_subprogress(label: str, percent: int) -> None:
     with RUN_PROGRESS_LOCK:
-        RUN_PROGRESS.update(sub_label=label, sub_percent=max(0, min(100, percent)))
+        changed = RUN_PROGRESS["sub_label"] != label
+        RUN_PROGRESS.update(
+            sub_label=label,
+            sub_percent=max(0, min(100, percent)),
+            output=(
+                RUN_PROGRESS["output"] + (f"  {label}\n" if changed else "")
+            )[-RUN_LOG_LIMIT:],
+        )
+
+
+def _append_run_output(line: str) -> None:
+    with RUN_PROGRESS_LOCK:
+        RUN_PROGRESS["output"] = (RUN_PROGRESS["output"] + line)[-RUN_LOG_LIMIT:]
 
 
 def _finish_progress() -> None:
@@ -135,7 +162,12 @@ def _raise_if_cancelled() -> None:
 def _run_command(
     command: list[str], workspace: Path, on_output=None, on_poll=None
 ) -> str:
-    return run_freqtrade(command, workspace, RUN_CANCEL, on_output, on_poll)
+    def track_output(line: str) -> None:
+        _append_run_output(line)
+        if on_output:
+            on_output(line)
+
+    return run_freqtrade(command, workspace, RUN_CANCEL, track_output, on_poll)
 
 
 def _track_hyperopt_epoch(line: str, total_epochs: int) -> None:
@@ -749,6 +781,26 @@ async def create_ai_strategy(body: AiStrategyGraphRequest) -> StrategySetup:
         return saved
     finally:
         _finish_progress()
+
+
+@commands.command()
+async def get_openai_api_key_status() -> dict[str, str | bool]:
+    return await asyncio.to_thread(openai_api_key_status)
+
+
+@commands.command()
+async def save_openai_api_key(body: OpenAiApiKeyRequest) -> dict[str, str | bool]:
+    api_key = body.api_key.strip()
+    if not api_key:
+        raise ValueError("OpenAI API key cannot be blank.")
+    await asyncio.to_thread(save_cached_openai_api_key, api_key)
+    return await asyncio.to_thread(openai_api_key_status)
+
+
+@commands.command()
+async def clear_openai_api_key() -> dict[str, str | bool]:
+    await asyncio.to_thread(clear_cached_openai_api_key)
+    return await asyncio.to_thread(openai_api_key_status)
 
 
 @commands.command()

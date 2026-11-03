@@ -5,6 +5,7 @@ import { pyInvoke } from "tauri-plugin-pytauri-api";
 import EquityChart from "./components/EquityChart.vue";
 import PathInput from "./components/PathInput.vue";
 import StrategyGraph from "./components/StrategyGraph.vue";
+import strataraSymbol from "./assets/stratara-symbol.png";
 
 type Parameter = { name: string; value: string; notes: string; enabled: boolean; locked: boolean };
 type Strategy = { id?: number; name: string; source: string; workspace_path: string; template_id: string; parameters: Parameter[]; freqtrade_payload?: Record<string, unknown>; strategy_file?: string | null };
@@ -15,6 +16,12 @@ type ValidationSlice = { label: string; timerange: string; backtest: Backtest };
 type OptimizationGoal = { profile: "balanced" | "higher_frequency" | "return_focused" | "capital_preservation"; target_trades_per_year: number; min_trades_per_test: number; max_drawdown_pct: number; min_profit_factor: number };
 type ValidationRun = { training: ValidationSlice; tests: ValidationSlice[]; stability_score: number; mean_return: number; return_stddev: number; total_test_trades: number; minimum_test_trades: number; coverage: string; output: string; snapshot_path?: string | null };
 type Dataset = { path: string; bytes: number };
+type ApiKeyStatus = {
+  configured: boolean;
+  source: string;
+  cache_configured: boolean;
+  environment_configured: boolean;
+};
 type ClearKind = "backtests" | "hyperopts" | "validations";
 type Template = { id: string; label: string; entry_id: string; exit_id: string };
 type StrategyComponent = { id: string; label: string; file_label: string; description: string };
@@ -89,12 +96,20 @@ const timeframes = ref("5m");
 const output = ref("");
 const error = ref("");
 const busy = ref(false);
+const openAiApiKey = ref("");
+const openAiApiKeyStatus = ref<ApiKeyStatus>({
+  configured: false,
+  source: "",
+  cache_configured: false,
+  environment_configured: false,
+});
+const savingOpenAiApiKey = ref(false);
 const activeTab = ref<"builder" | "optimizer" | "validation" | "logs" | "settings">("builder");
 const creationMode = ref<CreationMode>("manual");
 const clearingKind = ref("");
 const pendingClearKind = ref<ClearKind | null>(null);
 const validation = ref<ValidationRun | null>(null);
-type Progress = { active: boolean; label: string; percent: number; sub_label: string; sub_percent: number; steps: string[] };
+type Progress = { active: boolean; label: string; percent: number; sub_label: string; sub_percent: number; steps: string[]; output: string };
 const progress = ref<Progress | null>(null);
 let progressPoller: number | undefined;
 const sortColumn = ref<string | null>(null);
@@ -139,14 +154,17 @@ async function call<T>(command: string, body?: unknown) {
 async function refreshProgress() {
   try {
     const current = await pyInvoke<Progress>("get_freqtrade_progress");
-    if (current.active || busy.value) progress.value = current;
+    if (current.active || busy.value) {
+      progress.value = current;
+      output.value = current.output;
+    }
   } catch {
     // Browser previews do not have the PyTauri command bridge.
   }
 }
 
 function startProgress(label: string) {
-  progress.value = { active: true, label, percent: 0, sub_label: "Preparing", sub_percent: 0, steps: [label] };
+  progress.value = { active: true, label, percent: 0, sub_label: "Preparing", sub_percent: 0, steps: [label], output: "" };
   if (progressPoller === undefined) progressPoller = window.setInterval(() => void refreshProgress(), 350);
 }
 
@@ -164,8 +182,9 @@ async function cancelRun() {
 }
 
 async function refresh() {
-  const [workspace, savedTemplates, savedEntries, savedExits, savedHistory, savedNodeCatalog] = await Promise.all([
+  const [workspace, savedTemplates, savedEntries, savedExits, savedHistory, savedNodeCatalog, apiKeyStatus] = await Promise.all([
     call<string>("default_workspace"), call<Template[]>("list_freqtrade_templates"), call<StrategyComponent[]>("list_freqtrade_entries"), call<StrategyComponent[]>("list_freqtrade_exits"), call<Backtest[]>("list_imported_backtests"), call<StrategyNodeCatalog>("get_strategy_node_catalog"),
+    call<ApiKeyStatus>("get_openai_api_key_status"),
   ]);
   if (!strategy.value.workspace_path) strategy.value.workspace_path = workspace;
   templates.value = savedTemplates;
@@ -173,6 +192,7 @@ async function refresh() {
   exits.value = savedExits;
   history.value = savedHistory;
   nodeCatalog.value = savedNodeCatalog;
+  openAiApiKeyStatus.value = apiKeyStatus;
   datasets.value = await call<Dataset[]>("list_freqtrade_datasets", { workspace_path: strategy.value.workspace_path });
 }
 
@@ -201,7 +221,36 @@ async function clearResults() {
 
 function openSettings() {
   activeTab.value = "settings";
-  refreshDatasets().catch((cause) => error.value = String(cause));
+  Promise.all([
+    refreshDatasets(),
+    call<ApiKeyStatus>("get_openai_api_key_status").then((status) => openAiApiKeyStatus.value = status),
+  ]).catch((cause) => error.value = String(cause));
+}
+
+async function saveOpenAiApiKey() {
+  if (!openAiApiKey.value.trim()) return;
+  savingOpenAiApiKey.value = true;
+  try {
+    openAiApiKeyStatus.value = await call<ApiKeyStatus>("save_openai_api_key", {
+      api_key: openAiApiKey.value.trim(),
+    });
+    openAiApiKey.value = "";
+  } catch (cause) {
+    error.value = String(cause);
+  } finally {
+    savingOpenAiApiKey.value = false;
+  }
+}
+
+async function clearOpenAiApiKey() {
+  savingOpenAiApiKey.value = true;
+  try {
+    openAiApiKeyStatus.value = await call<ApiKeyStatus>("clear_openai_api_key");
+  } catch (cause) {
+    error.value = String(cause);
+  } finally {
+    savingOpenAiApiKey.value = false;
+  }
 }
 
 function applyPreset() {
@@ -307,6 +356,7 @@ function hydrateGoal(next: unknown) {
 
 async function run(hyperopt = false) {
   busy.value = true;
+  output.value = "";
   startProgress(hyperopt ? "Starting optimization" : "Starting backtest");
   try {
     const run = await call<StrategyRun>("run_freqtrade_backtest", { strategy: serializableStrategy(), config_path: configPath.value, exchange: exchange.value, trading_mode: tradingMode.value, pairs: pairs.value, timeframes: timeframes.value, timerange: timerange.value, hyperopt_epochs: hyperopt ? epochs.value : 0, optimization_goal: serializableGoal() });
@@ -442,7 +492,14 @@ onBeforeUnmount(() => {
     </aside>
     <main class="ml-14 min-h-screen px-4 py-8 sm:px-8">
     <section class="mx-auto max-w-6xl space-y-5">
-      <header><p class="text-sm text-base-content/60">Local Freqtrade strategy studio</p><h1 class="text-3xl font-semibold">Backtest Studio</h1><p class="mt-1 text-base-content/70">Create deterministic strategies, run native Freqtrade backtests and hyperopt, then export portable snapshots.</p></header>
+      <header class="flex items-center gap-3">
+        <img :src="strataraSymbol" alt="Stratara" class="size-12 shrink-0" />
+        <div>
+          <p class="text-sm text-base-content/60">Local Freqtrade strategy studio</p>
+          <h1 class="text-3xl font-semibold">Stratara</h1>
+          <p class="mt-1 text-base-content/70">Create deterministic strategies, run native Freqtrade backtests and hyperopt, then export portable snapshots.</p>
+        </div>
+      </header>
       <div v-if="error" role="alert" class="alert alert-error"><span>{{ error }}</span></div>
       <section v-if="activeTab === 'builder'" class="card bg-base-200">
         <div class="card-body">
@@ -592,6 +649,35 @@ onBeforeUnmount(() => {
         </div>
       </section>
       <section v-else class="card bg-base-200"><div class="card-body"><h2 class="card-title">Settings</h2>
+        <div class="mt-3 rounded-box border border-base-300 bg-base-100 p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 class="font-medium">OpenAI API key</h3>
+              <p class="mt-1 text-sm text-base-content/70">Used only for AI strategy generation. The key is kept in Stratara’s local app cache and is never included in strategy snapshots.</p>
+            </div>
+            <span v-if="openAiApiKeyStatus.configured" class="badge badge-success">Configured{{ openAiApiKeyStatus.source ? ` · ${openAiApiKeyStatus.source}` : "" }}</span>
+            <span v-else class="badge">Not configured</span>
+          </div>
+          <div class="mt-4 flex flex-wrap items-end gap-2">
+            <fieldset class="fieldset min-w-0 flex-1">
+              <legend class="fieldset-legend">API key</legend>
+              <input
+                v-model="openAiApiKey"
+                type="password"
+                autocomplete="off"
+                class="input w-full"
+                placeholder="Paste a new key to save or replace it"
+                @keyup.enter="saveOpenAiApiKey"
+              />
+            </fieldset>
+            <button class="btn btn-primary" type="button" :disabled="savingOpenAiApiKey || !openAiApiKey.trim()" @click="saveOpenAiApiKey">
+              Save
+              <span v-if="savingOpenAiApiKey" class="loading loading-spinner loading-sm"></span>
+            </button>
+            <button class="btn" type="button" :disabled="savingOpenAiApiKey || !openAiApiKeyStatus.cache_configured" @click="clearOpenAiApiKey">Clear saved key</button>
+          </div>
+          <p v-if="openAiApiKeyStatus.environment_configured" class="mt-2 text-xs text-base-content/60">OPENAI_API_KEY from the environment or .env takes precedence over the saved key.</p>
+        </div>
         <div class="mt-3 rounded-box border border-error/50 bg-error/5 p-4"><h3 class="font-medium text-error">Danger zone</h3><p class="mt-1 text-sm text-base-content/70">Clear run records and matching Freqtrade artifacts for the active workspace.</p><div role="alert" class="alert alert-error alert-soft mt-3 text-sm"><span>Clearing moves matching local snapshots and Freqtrade artifacts to the Recycle Bin. Downloaded datasets and strategy templates are kept.</span></div><div class="mt-3 grid gap-3 md:grid-cols-3"><div class="rounded-box border border-error/35 bg-base-100 p-4"><h4 class="font-medium">Backtests</h4><p class="mt-1 text-sm text-base-content/70">Clears saved backtest history and Freqtrade backtest exports.</p><button class="btn btn-error btn-sm mt-3" :disabled="clearingKind !== ''" @click="requestClear('backtests')">Clear backtests<span v-if="clearingKind === 'backtests'" class="loading loading-spinner loading-xs"></span></button></div><div class="rounded-box border border-error/35 bg-base-100 p-4"><h4 class="font-medium">Hyperopts</h4><p class="mt-1 text-sm text-base-content/70">Clears saved Hyperopt history and Freqtrade search artifacts.</p><button class="btn btn-error btn-sm mt-3" :disabled="clearingKind !== ''" @click="requestClear('hyperopts')">Clear hyperopts<span v-if="clearingKind === 'hyperopts'" class="loading loading-spinner loading-xs"></span></button></div><div class="rounded-box border border-error/35 bg-base-100 p-4"><h4 class="font-medium">Validations</h4><p class="mt-1 text-sm text-base-content/70">Clears validation snapshots and split-result artifacts.</p><button class="btn btn-error btn-sm mt-3" :disabled="clearingKind !== ''" @click="requestClear('validations')">Clear validations<span v-if="clearingKind === 'validations'" class="loading loading-spinner loading-xs"></span></button></div></div></div>
         <div class="mt-6"><div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="font-medium">Downloaded datasets</h3><p class="text-sm text-base-content/70">Cached Freqtrade candles are listed only; clearing them is not available yet.</p></div><button class="btn btn-sm" @click="refreshDatasets">Refresh</button></div><ul v-if="datasets.length" class="list mt-2 rounded-box border border-base-300"><li v-for="dataset in datasets" :key="dataset.path" class="list-row"><span class="list-col-grow break-all">{{ dataset.path }}</span><span class="text-sm text-base-content/60">{{ (dataset.bytes / 1024 / 1024).toFixed(2) }} MB</span></li></ul><p v-else class="mt-3 text-sm text-base-content/60">No downloaded Freqtrade datasets in this workspace.</p></div>
       </div></section>
