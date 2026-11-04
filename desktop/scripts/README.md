@@ -2,6 +2,9 @@
 
 > ref: <https://pytauri.github.io/pytauri/latest/usage/tutorial/build-standalone/>
 
-1. Use `download-py` to download `python-build-standalone` (only needed for the first build).
-    You can modify `download-py` to customize the required Python version.
-2. Use `build` to build the app.
+Run `pnpm tauri build` from `desktop`. On Windows it downloads portable Python if necessary,
+installs Stratara into it, then bundles that runtime with the app. Do not run `cargo build` or
+`pnpm exec tauri build` directly for a distributable build: those commands omit embedded Python.
+
+Install or launch the generated NSIS/MSI output under `target/bundle-release/bundle`, not the raw
+`target/release/stratara.exe` file.

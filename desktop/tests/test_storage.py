@@ -118,6 +118,15 @@ class FreqtradeStorageTests(unittest.TestCase):
         self.assertEqual(setup.freqtrade_payload["ai"]["model"], "gpt-6-luna")
         compile(setup.freqtrade_payload["strategy_source"], "<strategy>", "exec")
 
+    def test_ai_schema_requires_lowercase_snake_case_node_ids(self):
+        node_schema = ai_strategy._OUTPUT_SCHEMA["properties"]["graph"]["properties"][
+            "nodes"
+        ]["items"]
+        self.assertEqual(
+            node_schema["properties"]["id"]["pattern"],
+            "^[a-z][a-z0-9_]*$",
+        )
+
     def test_saved_graph_payload_accepts_parameter_objects(self):
         graph = PRESET_GRAPHS["fvg_atr"]()
         restored = ai_strategy.graph_from_payload(json.loads(json.dumps(graph.as_dict())))

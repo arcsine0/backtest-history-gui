@@ -4,6 +4,16 @@ import { spawnSync } from "node:child_process";
 
 const env = { ...process.env };
 const venv = env.VIRTUAL_ENV ?? join(process.cwd(), ".venv");
+const args = process.argv.slice(2);
+
+if (process.platform === "win32" && args[0] === "build") {
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(process.cwd(), "scripts", "windows", "build.ps1")],
+    { stdio: "inherit", env, shell: false },
+  );
+  process.exit(result.status ?? 1);
+}
 
 if (process.platform === "win32") {
   const configPath = join(venv, "pyvenv.cfg");
@@ -19,7 +29,7 @@ if (process.platform === "win32") {
   }
 }
 
-const result = spawnSync("pnpm", ["exec", "tauri", ...process.argv.slice(2)], {
+const result = spawnSync("pnpm", ["exec", "tauri", ...args], {
   stdio: "inherit",
   env,
   shell: process.platform === "win32",

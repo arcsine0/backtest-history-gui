@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "node scripts/tauri.mjs"
+    "tauri": "node scripts/tauri.mjs",
+    "prepare:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/download-py.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "2.9.1",

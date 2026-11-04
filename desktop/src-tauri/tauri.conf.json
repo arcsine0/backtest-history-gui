@@ -25,7 +25,8 @@
   "bundle": {
     "active": false,
     "icon": [
-      "icons/backtest-studio-symbol-v5.png"
+      "icons/backtest-studio-symbol-v5.png",
+      "icons/icon.ico"
     ]
   }
 }

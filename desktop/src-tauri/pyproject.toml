@@ -1,7 +1,7 @@
 [project]
-name = "desktop"
+name = "stratara"
 version = "0.1.0"
-description = "Add your description here"
+description = "Stratara Freqtrade strategy studio"
 readme = "README.md"
 authors = [
     { name = "you" }
