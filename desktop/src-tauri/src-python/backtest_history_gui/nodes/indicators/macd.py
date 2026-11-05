@@ -21,11 +21,11 @@ NODE = NodeDefinition(
     "indicators",
     "MACD",
     "Moving Average Convergence Divergence.",
-    inputs=(series_input("source", "Price series."),),
+    inputs=(series_input("source", "Price series.", semantic="price"),),
     outputs=(
-        series_output("line", "MACD line"),
-        series_output("signal", "MACD signal line"),
-        series_output("histogram", "MACD histogram"),
+        series_output("line", "MACD line", "oscillator"),
+        series_output("signal", "MACD signal line", "oscillator"),
+        series_output("histogram", "MACD histogram", "oscillator"),
     ),
     parameters=(
         int_param("fast_period", 12, "Fast EMA period.", 4, 20),

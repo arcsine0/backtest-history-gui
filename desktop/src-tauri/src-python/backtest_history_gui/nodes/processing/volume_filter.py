@@ -24,9 +24,9 @@ NODE = NodeDefinition(
     "processing",
     "Volume filter",
     "Compares volume against its rolling baseline.",
-    inputs=(series_input("volume", "Candle volume."),),
+    inputs=(series_input("volume", "Candle volume.", semantic="volume"),),
     outputs=(
-        series_output("baseline", "Rolling volume baseline"),
+        series_output("baseline", "Rolling volume baseline", "volume"),
         bool_output("above_baseline", "Volume passes threshold"),
     ),
     parameters=(

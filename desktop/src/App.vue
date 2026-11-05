@@ -71,6 +71,13 @@ type OptimizationGoal = {
     | "higher_frequency"
     | "return_focused"
     | "capital_preservation";
+  target_trades: number;
+  target_trades_timeframe:
+    | "daily"
+    | "weekly"
+    | "monthly"
+    | "quarterly"
+    | "yearly";
   target_trades_per_year: number;
   min_trades_per_test: number;
   max_drawdown_pct: number;
@@ -191,7 +198,9 @@ const quickValidationTimerange = ref(calendarTimerangeMonths(30));
 const epochs = ref(100);
 const optimizationGoal = ref<OptimizationGoal>({
   profile: "balanced",
-  target_trades_per_year: 100,
+  target_trades: 1,
+  target_trades_timeframe: "daily",
+  target_trades_per_year: 365,
   min_trades_per_test: 10,
   max_drawdown_pct: 25,
   min_profit_factor: 1.1,
@@ -587,7 +596,22 @@ function serializableStrategy() {
 }
 
 function serializableGoal(): OptimizationGoal {
-  return { ...optimizationGoal.value };
+  const goal = optimizationGoal.value;
+  const multiplier = {
+    daily: 365,
+    weekly: 52,
+    monthly: 12,
+    quarterly: 4,
+    yearly: 1,
+  }[goal.target_trades_timeframe];
+  return {
+    ...goal,
+    target_trades: Math.max(1, Math.round(goal.target_trades)),
+    target_trades_per_year: Math.min(
+      100000,
+      Math.max(1, Math.round(goal.target_trades * multiplier)),
+    ),
+  };
 }
 
 function hydrateGoal(next: unknown) {
@@ -603,8 +627,24 @@ function hydrateGoal(next: unknown) {
   )
     optimizationGoal.value.profile =
       value.profile as OptimizationGoal["profile"];
+  if (
+    typeof value.target_trades === "number" &&
+    Number.isFinite(value.target_trades) &&
+    ["daily", "weekly", "monthly", "quarterly", "yearly"].includes(
+      String(value.target_trades_timeframe),
+    )
+  ) {
+    optimizationGoal.value.target_trades = value.target_trades;
+    optimizationGoal.value.target_trades_timeframe =
+      value.target_trades_timeframe as OptimizationGoal["target_trades_timeframe"];
+  } else if (
+    typeof value.target_trades_per_year === "number" &&
+    Number.isFinite(value.target_trades_per_year)
+  ) {
+    optimizationGoal.value.target_trades = value.target_trades_per_year;
+    optimizationGoal.value.target_trades_timeframe = "yearly";
+  }
   for (const key of [
-    "target_trades_per_year",
     "min_trades_per_test",
     "max_drawdown_pct",
     "min_profit_factor",
@@ -1299,14 +1339,28 @@ onBeforeUnmount(() => {
                 </p>
               </fieldset>
               <fieldset class="fieldset">
-                <legend class="fieldset-legend">Target trades / year</legend>
-                <input
-                  v-model.number="optimizationGoal.target_trades_per_year"
-                  type="number"
-                  min="1"
-                  max="100000"
-                  class="input w-full"
-                />
+                <legend class="fieldset-legend">Target trades</legend>
+                <div class="join w-full">
+                  <select
+                    v-model="optimizationGoal.target_trades_timeframe"
+                    class="select join-item w-1/2"
+                    aria-label="Target trades timeframe"
+                  >
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="quarterly">Quarterly</option>
+                    <option value="yearly">Yearly</option>
+                  </select>
+                  <input
+                    v-model.number="optimizationGoal.target_trades"
+                    type="number"
+                    min="1"
+                    max="100000"
+                    class="input join-item w-1/2"
+                    aria-label="Target trade count"
+                  />
+                </div>
                 <p class="label">
                   A target, not a reason to accept losing churn.
                 </p>

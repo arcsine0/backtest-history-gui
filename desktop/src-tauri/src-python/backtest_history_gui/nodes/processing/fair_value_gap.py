@@ -28,14 +28,17 @@ NODE = NodeDefinition(
     "patterns",
     "Fair Value Gap",
     "Three-candle imbalance zone.",
-    inputs=(series_input("high", "Candle high."), series_input("low", "Candle low.")),
+    inputs=(
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+    ),
     outputs=(
         bool_output("bullish", "Bullish gap detected"),
         bool_output("bearish", "Bearish gap detected"),
-        series_output("bullish_lower", "Bullish gap lower boundary"),
-        series_output("bullish_upper", "Bullish gap upper boundary"),
-        series_output("bearish_lower", "Bearish gap lower boundary"),
-        series_output("bearish_upper", "Bearish gap upper boundary"),
+        series_output("bullish_lower", "Bullish gap lower boundary", "price"),
+        series_output("bullish_upper", "Bullish gap upper boundary", "price"),
+        series_output("bearish_lower", "Bearish gap lower boundary", "price"),
+        series_output("bearish_upper", "Bearish gap upper boundary", "price"),
     ),
     parameters=(
         decimal_param(

@@ -224,6 +224,7 @@ def _system_prompt() -> str:
             f"Set graph.version to {GRAPH_VERSION}; this is separate from the catalog version.",
             "Every node id must be unique lowercase snake_case (for example, ema_fast or entry_signal); never use spaces, hyphens, or uppercase letters.",
             "Every required input must have one compatible incoming edge.",
+            "Only compare or cross numeric ports with matching non-empty semantic tags from the catalog; do not compare oscillators with prices.",
             "Use input.ohlcv for candle fields, include signal.enter_long, risk.initial_stop, and a dynamic risk exit when suitable.",
             "Do not invent nodes, ports, parameter keys, indicators, or arbitrary Python.",
             "The filename must be a short strategy label only; the application adds market, pair, timeframe, and timestamp.",

@@ -29,6 +29,18 @@ class GraphParameter:
     space: str
 
 
+POSITION_ENTRY_NODES = frozenset(
+    {
+        "risk.stake_fraction",
+        "risk.stop_risk_sizing",
+        "risk.volatility_sizing",
+        "risk.max_exposure",
+        "risk.scale_in",
+        "risk.partial_take_profit",
+    }
+)
+
+
 def topological_nodes(graph: StrategyGraph) -> tuple[str, ...]:
     """Validate catalog node/port types and return a dependency-safe order."""
     nodes = {node.id: node for node in graph.nodes}
@@ -38,6 +50,7 @@ def topological_nodes(graph: StrategyGraph) -> tuple[str, ...]:
     for edge in graph.edges:
         _validate_edge(nodes, edge)
         dependencies[edge.target_node].add(edge.source_node)
+    _validate_semantic_relationships(nodes, graph.edges)
     ready = sorted(node_id for node_id in nodes if not dependencies[node_id])
     ordered: list[str] = []
     while ready:
@@ -62,7 +75,9 @@ def graph_parameters(graph: StrategyGraph) -> tuple[GraphParameter, ...]:
     for node in graph.nodes:
         definition = node_by_id(node.type)
         space = (
-            "exit"
+            "enter"
+            if definition.id in POSITION_ENTRY_NODES
+            else "exit"
             if definition.group == "risk" or node.id.startswith("exit_")
             else "enter"
         )
@@ -103,6 +118,14 @@ def _validate_parameter_relationships(graph: StrategyGraph) -> None:
             ):
                 raise GraphCompileError(
                     f"{node.id} minimum_gap_pct must be lower than maximum_gap_pct."
+                )
+    for edge in graph.edges:
+        target = next(node for node in graph.nodes if node.id == edge.target_node)
+        if target.type == "risk.stop_risk_sizing" and edge.target_port == "stoploss":
+            source = next(node for node in graph.nodes if node.id == edge.source_node)
+            if source.type != "risk.initial_stop":
+                raise GraphCompileError(
+                    "risk.stop_risk_sizing requires a risk.initial_stop input."
                 )
 
 
@@ -204,11 +227,41 @@ def compile_freqtrade_graph(
         for node_id, fragment in fragments.items()
         if fragment.phase == "risk"
     ]
+    stake_fragments = [
+        (node, fragment)
+        for node, fragment in risk_fragments
+        if "stake_multiplier" in fragment.outputs or "exposure_cap" in fragment.outputs
+    ]
+    position_fragments = [
+        (node, fragment)
+        for node, fragment in risk_fragments
+        if "position_adjustment" in fragment.outputs
+    ]
+    stake_node_ids = {node.id for node, _ in stake_fragments}
+    position_node_ids = {node.id for node, _ in position_fragments}
+    stake_dependencies = _risk_dependencies(graph, {node.id for node, _ in stake_fragments})
+    stake_statements = _indent(
+        [
+            statement
+            for node, fragment in risk_fragments
+            if node.id in stake_dependencies
+            for statement in fragment.statements
+        ]
+    )
+    position_statements = _indent(
+        [
+            statement
+            for _, fragment in position_fragments
+            for statement in fragment.statements
+        ]
+    )
     stop_statements = _indent(
         [
             statement
             for node, fragment in risk_fragments
             if node.type != "risk.time_stop"
+            and node.id not in stake_node_ids
+            and node.id not in position_node_ids
             for statement in fragment.statements
         ]
     )
@@ -241,6 +294,54 @@ def compile_freqtrade_graph(
         for node, fragment in risk_fragments
         if "stoploss" in fragment.outputs and node.type != "risk.initial_stop"
     ]
+    stake_multipliers = [
+        fragment.outputs["stake_multiplier"] for _, fragment in stake_fragments
+        if "stake_multiplier" in fragment.outputs
+    ]
+    exposure_caps = [
+        fragment.outputs["exposure_cap"] for _, fragment in stake_fragments
+        if "exposure_cap" in fragment.outputs
+    ]
+    stake_product = " * ".join(stake_multipliers) or "1.0"
+    stake_cap = f"min({', '.join(exposure_caps)})" if exposure_caps else "1.0"
+    stake_return = f"return min(max_stake, proposed_stake * min({stake_cap}, {stake_product}))"
+    # shortcut: register future candle-reading stake nodes here, generalize node callback requirements when this grows.
+    needs_stake_candle = any(
+        node.type in {"risk.volatility_sizing"} for node, _ in stake_fragments
+    )
+    custom_stake = "        return proposed_stake"
+    if stake_fragments:
+        candle_lines = (
+            "        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)\n"
+            "        if dataframe.empty:\n"
+            "            return proposed_stake\n"
+            "        candle = dataframe.iloc[-1]\n"
+            if needs_stake_candle
+            else ""
+        )
+        custom_stake = f"{candle_lines}{stake_statements or '        pass'}\n        {stake_return}"
+    position_adjustments = [
+        fragment.outputs["position_adjustment"] for _, fragment in position_fragments
+    ]
+    position_return = "        return None"
+    if position_adjustments:
+        partial_adjustments = [
+            fragment.outputs["position_adjustment"]
+            for node, fragment in position_fragments
+            if node.type == "risk.partial_take_profit"
+        ]
+        scale_adjustments = [
+            fragment.outputs["position_adjustment"]
+            for node, fragment in position_fragments
+            if node.type != "risk.partial_take_profit"
+        ]
+        position_return = (
+            f"{position_statements}\n"
+            f"        for adjustment in ({', '.join(partial_adjustments + scale_adjustments)}):\n"
+            "            if adjustment is not None:\n"
+            "                return adjustment\n"
+            "        return None"
+        )
     imports = "\n".join(result["imports"])
     declarations = _class_indent([_declaration(parameter) for parameter in parameters])
     seconds = _timeframe_minutes(timeframe) * 60
@@ -266,6 +367,8 @@ class {class_name}(IStrategy):
     minimal_roi = {{"0": 0.99}}
     use_exit_signal = True
     use_custom_stoploss = True
+    position_adjustment_enable = {bool(position_fragments)!r}
+    max_entry_position_adjustment = 3
     protections = [
         {{"method": "CooldownPeriod", "stop_duration_candles": 5}},
         {{"method": "MaxDrawdown", "lookback_period_candles": 288, "trade_limit": 20, "stop_duration_candles": 48, "max_allowed_drawdown": 0.20}},
@@ -283,6 +386,12 @@ class {class_name}(IStrategy):
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         return dataframe
+
+    def custom_stake_amount(self, pair, current_time, current_rate, proposed_stake, min_stake, max_stake, leverage, entry_tag, side, **kwargs):
+{custom_stake}
+
+    def adjust_trade_position(self, trade, current_time, current_rate, current_profit, min_stake, max_stake, current_entry_rate, current_exit_rate, current_entry_profit, current_exit_profit, **kwargs):
+{position_return}
 
     def custom_exit(self, pair, trade, current_time, current_rate, current_profit, **kwargs):
 {custom_exit}
@@ -320,6 +429,19 @@ def _module_name(node_type: str) -> str:
         "not": "not_gate",
     }.get(name, name)
     return f".nodes.{package}.{name}"
+
+
+def _risk_dependencies(graph: StrategyGraph, node_ids: set[str]) -> set[str]:
+    """Return risk-node dependencies needed in the stake callback."""
+    dependencies = set(node_ids)
+    changed = True
+    while changed:
+        changed = False
+        for edge in graph.edges:
+            if edge.target_node in dependencies and edge.source_node not in dependencies:
+                dependencies.add(edge.source_node)
+                changed = True
+    return dependencies
 
 
 def _parameter_references(
@@ -378,6 +500,44 @@ def _validate_edge(nodes: dict[str, object], edge: GraphEdge) -> None:
         raise GraphCompileError(
             f"Cannot connect {source.id}.{source_port.key} to {target.id}.{target_port.key}."
         )
+    if (
+        source_port.semantic
+        and target_port.semantic
+        and source_port.semantic != target_port.semantic
+    ):
+        raise GraphCompileError(
+            f"Cannot connect {source_port.semantic} data to {target_port.semantic} input."
+        )
+
+
+def _validate_semantic_relationships(
+    nodes: dict[str, object], edges: tuple[GraphEdge, ...]
+) -> None:
+    """Reject comparisons between incompatible numeric units before compilation."""
+    paired_inputs = {
+        "process.comparison": ("left", "right"),
+        "pattern.crossover": ("left", "right"),
+        "process.threshold_zone": ("source", "minimum", "maximum"),
+    }
+    definitions = {node_id: node_by_id(node.type) for node_id, node in nodes.items()}
+    for node_id, definition in definitions.items():
+        keys = paired_inputs.get(definition.id)
+        if not keys:
+            continue
+        semantics = {
+            next(
+                port.semantic
+                for port in definitions[edge.source_node].outputs
+                if port.key == edge.source_port
+            )
+            for edge in edges
+            if edge.target_node == node_id and edge.target_port in keys
+        }
+        semantics.discard("")
+        if len(semantics) > 1:
+            raise GraphCompileError(
+                f"{node_id} cannot compare incompatible data types: {', '.join(sorted(semantics))}."
+            )
 
 
 def _input_port_for(ports: tuple[Port, ...], key: str) -> Port | None:

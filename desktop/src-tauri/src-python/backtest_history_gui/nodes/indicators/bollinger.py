@@ -24,11 +24,11 @@ NODE = NodeDefinition(
     "indicators",
     "Bollinger Bands",
     "Rolling mean with configurable standard-deviation bands.",
-    inputs=(series_input("source", "Price series."),),
+    inputs=(series_input("source", "Price series.", semantic="price"),),
     outputs=(
-        series_output("lower", "Lower band"),
-        series_output("middle", "Moving-average band"),
-        series_output("upper", "Upper band"),
+        series_output("lower", "Lower band", "price"),
+        series_output("middle", "Moving-average band", "price"),
+        series_output("upper", "Upper band", "price"),
     ),
     parameters=(
         int_param("period", 20, "Band lookback period.", 5, 100),

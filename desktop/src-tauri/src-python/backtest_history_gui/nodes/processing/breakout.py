@@ -6,9 +6,9 @@ NODE = NodeDefinition(
     "Breakout",
     "Detects a close through a supplied range boundary.",
     inputs=(
-        series_input("close", "Candle close."),
-        series_input("upper", "Resistance boundary."),
-        series_input("lower", "Support boundary."),
+        series_input("close", "Candle close.", semantic="price"),
+        series_input("upper", "Resistance boundary.", semantic="price"),
+        series_input("lower", "Support boundary.", semantic="price"),
     ),
     outputs=(
         bool_output("bullish", "Upside breakout"),

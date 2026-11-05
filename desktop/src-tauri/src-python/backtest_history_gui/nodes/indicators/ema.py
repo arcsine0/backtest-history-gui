@@ -6,8 +6,8 @@ NODE = NodeDefinition(
     "indicators",
     "EMA",
     "Exponential moving average.",
-    inputs=(series_input("source", "Price or numeric series."),),
-    outputs=(series_output("value", "EMA"),),
+    inputs=(series_input("source", "Price series.", semantic="price"),),
+    outputs=(series_output("value", "EMA", "price"),),
     parameters=(int_param("period", 100, "EMA lookback period.", 5, 300),),
 )
 

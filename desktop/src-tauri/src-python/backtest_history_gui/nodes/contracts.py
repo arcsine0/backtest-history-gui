@@ -25,6 +25,7 @@ class Port:
     description: str = ""
     variadic: bool = False
     minimum_connections: int = 1
+    semantic: str = ""
 
 
 @dataclass(frozen=True)
@@ -54,8 +55,10 @@ class NodeDefinition:
         return asdict(self)
 
 
-def series_input(key: str, description: str, required: bool = True) -> Port:
-    return Port(key, "series.number", required, description)
+def series_input(
+    key: str, description: str, required: bool = True, semantic: str = ""
+) -> Port:
+    return Port(key, "series.number", required, description, semantic=semantic)
 
 
 def variadic_series_input(
@@ -92,8 +95,8 @@ def scalar_input(key: str, description: str, required: bool = True) -> Port:
     return Port(key, "scalar.number", required, description)
 
 
-def series_output(key: str, description: str) -> Port:
-    return Port(key, "series.number", True, description)
+def series_output(key: str, description: str, semantic: str = "") -> Port:
+    return Port(key, "series.number", True, description, semantic=semantic)
 
 
 def bool_output(key: str, description: str) -> Port:

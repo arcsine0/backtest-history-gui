@@ -20,11 +20,14 @@ NODE = NodeDefinition(
     "Stochastic",
     "Stochastic oscillator with K and D lines.",
     inputs=(
-        series_input("high", "Candle high."),
-        series_input("low", "Candle low."),
-        series_input("close", "Candle close."),
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+        series_input("close", "Candle close.", semantic="price"),
     ),
-    outputs=(series_output("k", "Stochastic K"), series_output("d", "Stochastic D")),
+    outputs=(
+        series_output("k", "Stochastic K", "oscillator"),
+        series_output("d", "Stochastic D", "oscillator"),
+    ),
     parameters=(
         int_param("k_period", 14, "K lookback.", 5, 50),
         int_param("d_period", 3, "D smoothing.", 2, 15),

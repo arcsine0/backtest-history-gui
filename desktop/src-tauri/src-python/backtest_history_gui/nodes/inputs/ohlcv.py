@@ -6,11 +6,11 @@ NODE = NodeDefinition(
     "OHLCV candles",
     "Market candle fields supplied by Freqtrade.",
     outputs=(
-        series_output("open", "Open price"),
-        series_output("high", "High price"),
-        series_output("low", "Low price"),
-        series_output("close", "Close price"),
-        series_output("volume", "Base volume"),
+        series_output("open", "Open price", "price"),
+        series_output("high", "High price", "price"),
+        series_output("low", "Low price", "price"),
+        series_output("close", "Close price", "price"),
+        series_output("volume", "Base volume", "volume"),
     ),
 )
 

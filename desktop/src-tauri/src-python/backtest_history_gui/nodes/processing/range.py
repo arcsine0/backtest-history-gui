@@ -31,13 +31,13 @@ NODE = NodeDefinition(
     "Trading range",
     "Rolling high-low range with a width filter.",
     inputs=(
-        series_input("high", "Candle high."),
-        series_input("low", "Candle low."),
-        series_input("close", "Candle close."),
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+        series_input("close", "Candle close.", semantic="price"),
     ),
     outputs=(
-        series_output("upper", "Range high"),
-        series_output("lower", "Range low"),
+        series_output("upper", "Range high", "price"),
+        series_output("lower", "Range low", "price"),
         bool_output("is_tight", "Range width is below threshold"),
     ),
     parameters=(

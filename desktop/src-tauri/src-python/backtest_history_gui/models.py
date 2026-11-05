@@ -1,9 +1,9 @@
 """Local contracts for the Freqtrade strategy studio."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[4])
 DEFAULT_WORKSPACE = str(Path(PROJECT_ROOT) / "data")
@@ -94,10 +94,42 @@ class RunLogExportRequest(BaseModel):
 
 class OptimizationGoal(BaseModel):
     profile: str = "balanced"
+    target_trades: int = Field(default=1, ge=1, le=100000)
+    target_trades_timeframe: Literal[
+        "daily", "weekly", "monthly", "quarterly", "yearly"
+    ] = "daily"
     target_trades_per_year: int = Field(default=100, ge=1, le=100000)
     min_trades_per_test: int = Field(default=10, ge=1, le=10000)
     max_drawdown_pct: float = Field(default=25, gt=0, le=100)
     min_profit_factor: float = Field(default=1.1, ge=0, le=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_annual_target(cls, value: Any) -> Any:
+        if (
+            not isinstance(value, dict)
+            or "target_trades" in value
+            or "target_trades_per_year" not in value
+        ):
+            return value
+        migrated = dict(value)
+        migrated["target_trades"] = migrated.get("target_trades_per_year", 100)
+        migrated["target_trades_timeframe"] = "yearly"
+        return migrated
+
+    @model_validator(mode="after")
+    def set_annual_target(self) -> "OptimizationGoal":
+        multiplier = {
+            "daily": 365,
+            "weekly": 52,
+            "monthly": 12,
+            "quarterly": 4,
+            "yearly": 1,
+        }[self.target_trades_timeframe]
+        self.target_trades_per_year = min(
+            100000, max(1, self.target_trades * multiplier)
+        )
+        return self
 
 
 class OptimizationReport(BaseModel):

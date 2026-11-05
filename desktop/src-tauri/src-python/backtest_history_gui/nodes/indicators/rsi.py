@@ -20,7 +20,7 @@ NODE = NodeDefinition(
     "indicators",
     "RSI",
     "Relative Strength Index.",
-    inputs=(series_input("source", "Price series."),),
-    outputs=(series_output("value", "RSI from 0 to 100"),),
+    inputs=(series_input("source", "Price series.", semantic="price"),),
+    outputs=(series_output("value", "RSI from 0 to 100", "oscillator"),),
     parameters=(int_param("period", 14, "RSI lookback period.", 5, 50),),
 )

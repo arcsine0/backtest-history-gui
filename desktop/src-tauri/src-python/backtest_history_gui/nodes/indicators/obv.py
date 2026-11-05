@@ -6,10 +6,10 @@ NODE = NodeDefinition(
     "OBV",
     "On-balance volume.",
     inputs=(
-        series_input("close", "Candle close."),
-        series_input("volume", "Candle volume."),
+        series_input("close", "Candle close.", semantic="price"),
+        series_input("volume", "Candle volume.", semantic="volume"),
     ),
-    outputs=(series_output("value", "OBV"),),
+    outputs=(series_output("value", "OBV", "volume"),),
 )
 
 

@@ -21,10 +21,10 @@ NODE = NodeDefinition(
     "ATR",
     "Average True Range.",
     inputs=(
-        series_input("high", "Candle high."),
-        series_input("low", "Candle low."),
-        series_input("close", "Candle close."),
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+        series_input("close", "Candle close.", semantic="price"),
     ),
-    outputs=(series_output("value", "ATR"),),
+    outputs=(series_output("value", "ATR", "price"),),
     parameters=(int_param("period", 14, "ATR lookback period.", 5, 50),),
 )

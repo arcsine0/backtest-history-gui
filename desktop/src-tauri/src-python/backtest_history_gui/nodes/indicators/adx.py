@@ -21,14 +21,14 @@ NODE = NodeDefinition(
     "ADX",
     "Average Directional Index and directional movement.",
     inputs=(
-        series_input("high", "Candle high."),
-        series_input("low", "Candle low."),
-        series_input("close", "Candle close."),
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+        series_input("close", "Candle close.", semantic="price"),
     ),
     outputs=(
-        series_output("adx", "Trend strength"),
-        series_output("plus_di", "Positive directional index"),
-        series_output("minus_di", "Negative directional index"),
+        series_output("adx", "Trend strength", "oscillator"),
+        series_output("plus_di", "Positive directional index", "oscillator"),
+        series_output("minus_di", "Negative directional index", "oscillator"),
     ),
     parameters=(int_param("period", 14, "ADX lookback period.", 5, 50),),
 )

@@ -32,12 +32,15 @@ NODE = NodeDefinition(
     "patterns",
     "Swing high / low",
     "Confirmed local swing points using completed candles on both sides.",
-    inputs=(series_input("high", "Candle high."), series_input("low", "Candle low.")),
+    inputs=(
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+    ),
     outputs=(
         bool_output("swing_high", "Confirmed swing high"),
         bool_output("swing_low", "Confirmed swing low"),
-        series_output("last_swing_high", "Most recent confirmed swing high"),
-        series_output("last_swing_low", "Most recent confirmed swing low"),
+        series_output("last_swing_high", "Most recent confirmed swing high", "price"),
+        series_output("last_swing_low", "Most recent confirmed swing low", "price"),
     ),
     parameters=(
         int_param("strength", 3, "Completed candles required on each side.", 1, 10),

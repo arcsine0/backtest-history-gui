@@ -44,6 +44,7 @@ from backtest_history_gui.nodes import (
 from backtest_history_gui.graph_compiler import (
     GraphCompileError,
     compile_graph_fragments,
+    compile_freqtrade_graph,
     graph_parameters,
     topological_nodes,
 )
@@ -74,6 +75,69 @@ class FreqtradeStorageTests(unittest.TestCase):
         self.assertEqual(parameters[0].value, 70)
         self.assertEqual(parameters[0].definition.minimum, 55)
         self.assertEqual(parameters[0].definition.maximum, 85)
+
+    def test_compiles_hyperoptable_position_sizing_and_adjustment_nodes(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode("candles", "input.ohlcv"),
+                GraphNode("trade", "input.trade_state"),
+                GraphNode("atr", "indicator.atr", {"period": 14}),
+                GraphNode("entry_check", "process.comparison", {"operator": "greater_or_equal"}),
+                GraphNode("enter", "signal.enter_long"),
+                GraphNode("initial_stop", "risk.initial_stop", {"loss_pct": 0.05}),
+                GraphNode("stake_fraction", "risk.stake_fraction", {"fraction": 0.1}),
+                GraphNode("stop_size", "risk.stop_risk_sizing"),
+                GraphNode("volatility_size", "risk.volatility_sizing"),
+                GraphNode("exposure_cap", "risk.max_exposure"),
+                GraphNode("scale_in", "risk.scale_in"),
+                GraphNode("partial_profit", "risk.partial_take_profit"),
+            ),
+            edges=(
+                GraphEdge("candles", "high", "atr", "high"),
+                GraphEdge("candles", "low", "atr", "low"),
+                GraphEdge("candles", "close", "atr", "close"),
+                GraphEdge("candles", "close", "entry_check", "left"),
+                GraphEdge("candles", "close", "entry_check", "right"),
+                GraphEdge("entry_check", "result", "enter", "condition"),
+                GraphEdge("trade", "trade", "initial_stop", "trade"),
+                GraphEdge("initial_stop", "stoploss", "stop_size", "stoploss"),
+                GraphEdge("atr", "value", "volatility_size", "atr"),
+                GraphEdge("candles", "close", "volatility_size", "close"),
+                GraphEdge("trade", "trade", "scale_in", "trade"),
+                GraphEdge("trade", "current_profit", "scale_in", "current_profit"),
+                GraphEdge("trade", "trade", "partial_profit", "trade"),
+                GraphEdge("trade", "current_profit", "partial_profit", "current_profit"),
+            ),
+        )
+        source = compile_freqtrade_graph(graph, "RiskManagedGraph")
+        self.assertIn("def custom_stake_amount", source)
+        self.assertIn("def adjust_trade_position", source)
+        self.assertIn("position_adjustment_enable = True", source)
+        self.assertIn('space="enter"', source)
+        stake_callback = source.split("def custom_stake_amount", 1)[1].split(
+            "def adjust_trade_position", 1
+        )[0]
+        self.assertIn("dataframe, _ = self.dp.get_analyzed_dataframe", stake_callback)
+        self.assertLess(stake_callback.index("candle = dataframe.iloc[-1]"), stake_callback.index("candle['node_atr_value']"))
+        compile(source, "<risk-managed-graph>", "exec")
+
+    def test_rejects_comparing_oscillator_to_price(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode("candles", "input.ohlcv"),
+                GraphNode("adx", "indicator.adx", {"period": 14}),
+                GraphNode("invalid", "process.comparison"),
+            ),
+            edges=(
+                GraphEdge("candles", "high", "adx", "high"),
+                GraphEdge("candles", "low", "adx", "low"),
+                GraphEdge("candles", "close", "adx", "close"),
+                GraphEdge("adx", "adx", "invalid", "left"),
+                GraphEdge("candles", "close", "invalid", "right"),
+            ),
+        )
+        with self.assertRaisesRegex(GraphCompileError, "incompatible data types"):
+            topological_nodes(graph)
 
     def test_ai_graph_envelope_is_normalized_and_compiled_before_persistence(self):
         graph = next(iter(PRESET_GRAPHS.values()))()
@@ -150,7 +214,7 @@ class FreqtradeStorageTests(unittest.TestCase):
     def test_node_catalog_is_unique_serializable_and_exposes_indicator_parameters(self):
         catalog = node_catalog()
         json.dumps(catalog)
-        self.assertEqual(catalog["version"], 2)
+        self.assertEqual(catalog["version"], 4)
         self.assertEqual(
             len(catalog["nodes"]), len({node["id"] for node in catalog["nodes"]})
         )
@@ -534,6 +598,24 @@ class FreqtradeStorageTests(unittest.TestCase):
         high_coverage, _ = runner.validation_stability_score([1.0, 1.1], [20, 20], 10)
         low_coverage, _ = runner.validation_stability_score([1.0, 1.1], [1, 1], 10)
         self.assertGreater(high_coverage, low_coverage)
+
+    def test_target_trade_timeframe_is_annualized_and_legacy_safe(self):
+        default_goal = models.OptimizationGoal()
+        weekly_goal = models.OptimizationGoal(
+            target_trades=2, target_trades_timeframe="weekly"
+        )
+        legacy_goal = models.OptimizationGoal(target_trades_per_year=100)
+        self.assertEqual(default_goal.target_trades_timeframe, "daily")
+        self.assertEqual(default_goal.target_trades_per_year, 365)
+        self.assertEqual(weekly_goal.target_trades_per_year, 104)
+        self.assertEqual(legacy_goal.target_trades, 100)
+        self.assertEqual(legacy_goal.target_trades_timeframe, "yearly")
+        self.assertEqual(
+            runner.annual_target_trades(
+                {"target_trades": 3, "target_trades_timeframe": "monthly"}
+            ),
+            36,
+        )
 
     def test_validation_snapshot_contains_all_splits(self):
         with tempfile.TemporaryDirectory() as directory:

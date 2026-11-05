@@ -24,11 +24,14 @@ NODE = NodeDefinition(
     "indicators",
     "Donchian Channel",
     "Rolling highest high and lowest low.",
-    inputs=(series_input("high", "Candle high."), series_input("low", "Candle low.")),
+    inputs=(
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+    ),
     outputs=(
-        series_output("upper", "Channel high"),
-        series_output("lower", "Channel low"),
-        series_output("middle", "Channel midpoint"),
+        series_output("upper", "Channel high", "price"),
+        series_output("lower", "Channel low", "price"),
+        series_output("middle", "Channel midpoint", "price"),
     ),
     parameters=(int_param("period", 20, "Channel lookback period.", 5, 200),),
 )

@@ -25,12 +25,12 @@ NODE = NodeDefinition(
     "VWAP",
     "Rolling volume-weighted average price.",
     inputs=(
-        series_input("high", "Candle high."),
-        series_input("low", "Candle low."),
-        series_input("close", "Candle close."),
-        series_input("volume", "Candle volume."),
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("low", "Candle low.", semantic="price"),
+        series_input("close", "Candle close.", semantic="price"),
+        series_input("volume", "Candle volume.", semantic="volume"),
     ),
-    outputs=(series_output("value", "VWAP"),),
+    outputs=(series_output("value", "VWAP", "price"),),
     parameters=(
         int_param(
             "period", 96, "Rolling VWAP lookback; use one session in candles.", 12, 288

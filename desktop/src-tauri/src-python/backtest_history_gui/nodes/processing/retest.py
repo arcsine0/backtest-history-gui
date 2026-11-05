@@ -35,10 +35,10 @@ NODE = NodeDefinition(
     "Level retest",
     "Detects a return to a level followed by a close back through it.",
     inputs=(
-        series_input("low", "Candle low."),
-        series_input("high", "Candle high."),
-        series_input("close", "Candle close."),
-        series_input("level", "Level or zone boundary."),
+        series_input("low", "Candle low.", semantic="price"),
+        series_input("high", "Candle high.", semantic="price"),
+        series_input("close", "Candle close.", semantic="price"),
+        series_input("level", "Level or zone boundary.", semantic="price"),
     ),
     outputs=(
         bool_output("bullish", "Bullish level reclaim"),

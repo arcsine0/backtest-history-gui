@@ -43,15 +43,21 @@ from .logic.or_gate import NODE as OR
 from .logic.xor import NODE as XOR
 from .risk.atr_trailing import NODE as ATR_TRAILING
 from .risk.initial_stop import NODE as INITIAL_STOP
+from .risk.max_exposure import NODE as MAX_EXPOSURE
+from .risk.partial_take_profit import NODE as PARTIAL_TAKE_PROFIT
 from .risk.profit_trailing import NODE as PROFIT_TRAILING
 from .risk.rsi_trailing import NODE as RSI_TRAILING
+from .risk.scale_in import NODE as SCALE_IN
+from .risk.stake_fraction import NODE as STAKE_FRACTION
+from .risk.stop_risk_sizing import NODE as STOP_RISK_SIZING
 from .risk.time_stop import NODE as TIME_STOP
+from .risk.volatility_sizing import NODE as VOLATILITY_SIZING
 from .signals.enter_long import NODE as ENTER_LONG
 from .signals.exit_long import NODE as EXIT_LONG
 from .signals.skip import NODE as SKIP
 from .statistics.aggregate import NODE as STATISTIC_AGGREGATE
 
-CATALOG_VERSION = 2
+CATALOG_VERSION = 4
 NODES: tuple[NodeDefinition, ...] = (
     OHLCV,
     CONSTANT,
@@ -93,6 +99,12 @@ NODES: tuple[NodeDefinition, ...] = (
     VOLUME_FILTER,
     LOOKBACK,
     INITIAL_STOP,
+    STAKE_FRACTION,
+    STOP_RISK_SIZING,
+    VOLATILITY_SIZING,
+    MAX_EXPOSURE,
+    SCALE_IN,
+    PARTIAL_TAKE_PROFIT,
     ATR_TRAILING,
     PROFIT_TRAILING,
     RSI_TRAILING,

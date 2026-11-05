@@ -22,6 +22,22 @@ from typing import Any, Callable
 from .models import OptimizationReport
 
 
+def annual_target_trades(goal: dict[str, Any]) -> int:
+    """Normalize the UI's target-trade period for Freqtrade's annualized data."""
+    target = goal.get("target_trades")
+    timeframe = str(goal.get("target_trades_timeframe", ""))
+    multipliers = {
+        "daily": 365,
+        "weekly": 52,
+        "monthly": 12,
+        "quarterly": 4,
+        "yearly": 1,
+    }
+    if timeframe in multipliers and isinstance(target, (int, float)):
+        return min(100000, max(1, round(target * multipliers[timeframe])))
+    return min(100000, max(1, int(goal.get("target_trades_per_year", 100))))
+
+
 def download_data_command(
     exchange: str,
     trading_mode: str,
@@ -203,7 +219,7 @@ def write_goal_hyperopt_loss(workspace: Path, goal: dict[str, Any]) -> tuple[str
         "return_focused": (0.5, 2.0, 1.0),
         "capital_preservation": (0.5, 1.0, 2.0),
     }.get(profile, (1.0, 1.0, 1.0))
-    target = int(goal.get("target_trades_per_year", 100))
+    target = annual_target_trades(goal)
     max_drawdown = float(goal.get("max_drawdown_pct", 25)) / 100
     minimum_profit_factor = float(goal.get("min_profit_factor", 1.1))
     directory = workspace / "user_data" / "hyperopts"
@@ -594,7 +610,7 @@ def read_hyperopt_report(
     if not records:
         raise ValueError("Freqtrade Hyperopt did not record evaluated configurations.")
     years = _timerange_years(timerange)
-    target = int(goal.get("target_trades_per_year", 100))
+    target = annual_target_trades(goal)
     max_drawdown = float(goal.get("max_drawdown_pct", 25)) / 100
     minimum_pf = float(goal.get("min_profit_factor", 1.1))
     profile = str(goal.get("profile", "balanced"))
