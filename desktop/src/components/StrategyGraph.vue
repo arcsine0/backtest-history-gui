@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import {
   Handle,
   Position,
   VueFlow,
   type Connection,
   type Edge,
+  type EdgeMouseEvent,
   type Node,
 } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
@@ -79,6 +80,12 @@ const emit = defineEmits<{
 }>();
 
 const pendingInputSlots = ref<Record<string, string[]>>({});
+const NODE_WIDTH = 272;
+const NODE_HORIZONTAL_GAP = 88;
+const NODE_VERTICAL_GAP = 64;
+const OUTCOME_NODE_GROUPS = new Set(["risk", "signals"]);
+const focusedEdgeId = ref<string | null>(null);
+const flowElement = ref<HTMLElement | null>(null);
 
 const definitions = computed(
   () => new Map(props.catalog.map((definition) => [definition.id, definition])),
@@ -300,11 +307,13 @@ function parametersFor(node: GraphNode): ResolvedParameter[] {
 }
 
 function nodeHeight(node: GraphNode) {
+  const portRows =
+    portsFor(node, "input").length + portsFor(node, "output").length;
   return (
-    58 +
-    Math.max(portsFor(node, "input").length, portsFor(node, "output").length) *
-      24 +
-    parametersFor(node).length * 54
+    56 +
+    portRows * 26 +
+    variadicInputsFor(node).length * 32 +
+    parametersFor(node).length * 62
   );
 }
 
@@ -330,16 +339,76 @@ const nodeDepths = computed(() => {
   return new Map(props.graph.nodes.map((node) => [node.id, resolve(node.id)]));
 });
 
+function isOutcomeNode(node: GraphNode) {
+  const definition = definitions.value.get(node.type);
+  return definition ? OUTCOME_NODE_GROUPS.has(definition.group) : false;
+}
+
+const outcomeColumn = computed(() => {
+  const processingDepths = props.graph.nodes
+    .filter((node) => !isOutcomeNode(node))
+    .map((node) => nodeDepths.value.get(node.id) ?? 0);
+  return (processingDepths.length ? Math.max(...processingDepths) : 0) + 1;
+});
+
+function graphEdgeId(edge: GraphEdge, index: number) {
+  return `${edge.source_node}-${edge.source_port}-${edge.target_node}-${edge.target_port}-${index}`;
+}
+
+function applyFocusedEdgeState() {
+  const edge = props.graph.edges.find(
+    (candidate, index) =>
+      graphEdgeId(candidate, index) === focusedEdgeId.value,
+  );
+  const focusedNodeIds = edge
+    ? new Set([edge.source_node, edge.target_node])
+    : new Set<string>();
+  void nextTick(() => {
+    window.requestAnimationFrame(() => {
+      const root = flowElement.value;
+      if (!root) return;
+      root.querySelectorAll(".vue-flow__node").forEach((node) => {
+        const focused = focusedNodeIds.has(node.getAttribute("data-id") ?? "");
+        node.classList.toggle("strategy-node--focused", focused);
+        node.classList.toggle(
+          "strategy-node--dimmed",
+          focusedNodeIds.size > 0 && !focused,
+        );
+      });
+      root.querySelectorAll(".vue-flow__edge").forEach((edgeElement) => {
+        edgeElement.classList.toggle(
+          "strategy-edge--focused",
+          edgeElement.getAttribute("data-id") === focusedEdgeId.value,
+        );
+      });
+    });
+  });
+}
+
+function toggleFocusedEdge({ event, edge }: EdgeMouseEvent) {
+  event.stopPropagation();
+  focusedEdgeId.value = focusedEdgeId.value === edge.id ? null : edge.id;
+  applyFocusedEdgeState();
+}
+
+function clearFocusedEdge() {
+  if (!focusedEdgeId.value) return;
+  focusedEdgeId.value = null;
+  applyFocusedEdgeState();
+}
+
 const flowNodes = computed<Node<FlowNodeData>[]>(() => {
   const lanes = new Map<number, number>();
   return props.graph.nodes.map((node) => {
-    const depth = nodeDepths.value.get(node.id) ?? 0;
-    const y = lanes.get(depth) ?? 0;
-    lanes.set(depth, y + nodeHeight(node) + 36);
+    const column = isOutcomeNode(node)
+      ? outcomeColumn.value
+      : (nodeDepths.value.get(node.id) ?? 0);
+    const y = lanes.get(column) ?? 0;
+    lanes.set(column, y + nodeHeight(node) + NODE_VERTICAL_GAP);
     const definition = definitions.value.get(node.type);
     return {
       id: node.id,
-      position: { x: depth * 340, y },
+      position: { x: column * (NODE_WIDTH + NODE_HORIZONTAL_GAP), y },
       data: {
         label: definition?.label ?? node.id,
         type: node.type,
@@ -359,16 +428,20 @@ const flowNodes = computed<Node<FlowNodeData>[]>(() => {
 });
 
 const flowEdges = computed<Edge[]>(() =>
-  props.graph.edges.map((edge, index) => ({
-    id: `${edge.source_node}-${edge.source_port}-${edge.target_node}-${edge.target_port}-${index}`,
-    source: edge.source_node,
-    sourceHandle: `out:${edge.source_port}`,
-    target: edge.target_node,
-    targetHandle: `in:${edge.target_port}`,
-    type: "smoothstep",
-    selectable: Boolean(props.editable),
-    focusable: Boolean(props.editable),
-  })),
+  props.graph.edges.map((edge, index) => {
+    const id = graphEdgeId(edge, index);
+    return {
+      id,
+      source: edge.source_node,
+      sourceHandle: `out:${edge.source_port}`,
+      target: edge.target_node,
+      targetHandle: `in:${edge.target_port}`,
+      type: "smoothstep",
+      selectable: false,
+      focusable: false,
+      interactionWidth: 16,
+    };
+  }),
 );
 
 const graphKey = computed(() =>
@@ -409,7 +482,10 @@ function isRanged(parameter: ResolvedParameter) {
 </script>
 
 <template>
-  <div class="strategy-flow rounded-box border border-base-300 bg-base-100">
+  <div
+    ref="flowElement"
+    class="strategy-flow rounded-box border border-base-300 bg-base-100"
+  >
     <VueFlow
       :key="graphKey"
       :nodes="flowNodes"
@@ -429,6 +505,9 @@ function isRanged(parameter: ResolvedParameter) {
       :is-valid-connection="isValidConnection"
       @connect="onConnect"
       @edges-delete="removeEdges"
+      @edge-click="toggleFocusedEdge"
+      @node-click="clearFocusedEdge"
+      @pane-click="clearFocusedEdge"
     >
       <Background variant="dots" :gap="18" :size="1" />
       <Controls :show-interactive="false" />
@@ -579,6 +658,15 @@ function isRanged(parameter: ResolvedParameter) {
   text-align: left;
 }
 
+.strategy-flow .strategy-node--focused .strategy-flow-node {
+  border-color: white;
+  box-shadow: 0 0 0 2px color-mix(in oklab, white 88%, transparent);
+}
+
+.strategy-flow .strategy-node--dimmed .strategy-flow-node {
+  opacity: 0.35;
+}
+
 .strategy-flow-node__header {
   display: flex;
   align-items: baseline;
@@ -704,4 +792,10 @@ function isRanged(parameter: ResolvedParameter) {
   stroke: color-mix(in oklab, var(--color-base-content) 45%, transparent);
   stroke-width: 1.5;
 }
+
+.strategy-flow .strategy-edge--focused .vue-flow__edge-path {
+  stroke: white;
+  stroke-width: 2.5;
+}
+
 </style>
