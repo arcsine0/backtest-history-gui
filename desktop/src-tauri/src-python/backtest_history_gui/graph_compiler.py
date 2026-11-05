@@ -10,7 +10,7 @@ from importlib import import_module
 
 from .graph_schema import GraphEdge, StrategyGraph
 from .nodes import NodeCompileError, node_by_id, node_compile_context
-from .nodes.contracts import Parameter
+from .nodes.contracts import Parameter, Port
 
 
 class GraphCompileError(ValueError):
@@ -57,6 +57,7 @@ def topological_nodes(graph: StrategyGraph) -> tuple[str, ...]:
 def graph_parameters(graph: StrategyGraph) -> tuple[GraphParameter, ...]:
     """Return every optimizable graph parameter with its Freqtrade space."""
     topological_nodes(graph)
+    _validate_parameter_relationships(graph)
     parameters: list[GraphParameter] = []
     for node in graph.nodes:
         definition = node_by_id(node.type)
@@ -81,6 +82,28 @@ def graph_parameters(graph: StrategyGraph) -> tuple[GraphParameter, ...]:
                     )
                 )
     return tuple(parameters)
+
+
+def _validate_parameter_relationships(graph: StrategyGraph) -> None:
+    for node in graph.nodes:
+        if node.type == "indicator.macd":
+            fast = node.parameters.get("fast_period")
+            slow = node.parameters.get("slow_period")
+            if isinstance(fast, int) and isinstance(slow, int) and fast >= slow:
+                raise GraphCompileError(
+                    f"{node.id} fast_period must be lower than slow_period."
+                )
+        if node.type == "pattern.fair_value_gap":
+            minimum = node.parameters.get("minimum_gap_pct")
+            maximum = node.parameters.get("maximum_gap_pct")
+            if (
+                isinstance(minimum, (int, float))
+                and isinstance(maximum, (int, float))
+                and minimum >= maximum
+            ):
+                raise GraphCompileError(
+                    f"{node.id} minimum_gap_pct must be lower than maximum_gap_pct."
+                )
 
 
 def _declared_input_parameter(node, definition, space: str) -> GraphParameter:
@@ -285,8 +308,17 @@ def _module_name(node_type: str) -> str:
         "filter": "processing",
         "risk": "risk",
         "signal": "signals",
+        "logic": "logic",
+        "arithmetic": "arithmetic",
+        "statistic": "statistics",
     }[group]
-    name = {"boolean": "boolean_logic", "volume": "volume_filter"}.get(name, name)
+    name = {
+        "boolean": "boolean_logic",
+        "volume": "volume_filter",
+        "and": "and_gate",
+        "or": "or_gate",
+        "not": "not_gate",
+    }.get(name, name)
     return f".nodes.{package}.{name}"
 
 
@@ -339,12 +371,25 @@ def _validate_edge(nodes: dict[str, object], edge: GraphEdge) -> None:
     source_port = next(
         (port for port in source.outputs if port.key == edge.source_port), None
     )
-    target_port = next(
-        (port for port in target.inputs if port.key == edge.target_port), None
-    )
+    target_port = _input_port_for(target.inputs, edge.target_port)
     if not source_port or not target_port:
         raise GraphCompileError("Graph edge references an unknown port.")
     if source_port.value_type != target_port.value_type:
         raise GraphCompileError(
             f"Cannot connect {source.id}.{source_port.key} to {target.id}.{target_port.key}."
         )
+
+
+def _input_port_for(ports: tuple[Port, ...], key: str) -> Port | None:
+    return next(
+        (
+            port
+            for port in ports
+            if key == port.key
+            or (
+                port.variadic
+                and re.fullmatch(rf"{re.escape(port.key)}_[1-9][0-9]*", key)
+            )
+        ),
+        None,
+    )

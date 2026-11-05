@@ -31,7 +31,7 @@ NODE = NodeDefinition(
         series_output("upper", "Upper band"),
     ),
     parameters=(
-        int_param("period", 20, "Band lookback period.", 2, 500),
-        decimal_param("stddev", 2.0, "Band standard deviations.", 0.1, 10.0, 2),
+        int_param("period", 20, "Band lookback period.", 5, 100),
+        decimal_param("stddev", 2.0, "Band standard deviations.", 0.5, 4.0, 2),
     ),
 )

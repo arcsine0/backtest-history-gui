@@ -528,8 +528,18 @@ def apply_parameter_file_to_source(source: str, parameter_file: dict[str, Any]) 
                 source,
             )
     for name, value in values.items():
-        pattern = rf"(?m)^(    {re.escape(name)}\s*=\s*(?:IntParameter|DecimalParameter)\([^\n]*?default=)[^,\)]+"
-        source = re.sub(pattern, lambda match: f"{match.group(1)}{value!r}", source)
+        pattern = rf"(?m)^(    {re.escape(name)}\s*=\s*(IntParameter|DecimalParameter)\(([^,]+),\s*([^,]+),\s*default=)[^,\)]+"
+
+        def replace(match: re.Match[str]) -> str:
+            if not isinstance(value, (int, float)):
+                return match.group(0)
+            lower, upper = float(match.group(3)), float(match.group(4))
+            bounded = min(upper, max(lower, float(value)))
+            if match.group(2) == "IntParameter":
+                bounded = int(round(bounded))
+            return f"{match.group(1)}{bounded!r}"
+
+        source = re.sub(pattern, replace, source)
     return source
 
 
@@ -672,16 +682,14 @@ def read_hyperopt_report(
 def reconcile_optimization_report(
     report: OptimizationReport, rebacktest_trade_count: int, timerange: str
 ) -> OptimizationReport:
-    """Keep the persisted report aligned with the final backtest, which is authoritative."""
+    """Reject an exported parameter set that does not reproduce Hyperopt's result."""
     if report.best_trade_count == rebacktest_trade_count:
         return report
-    report.hyperopt_trade_count = report.best_trade_count
-    report.best_trade_count = rebacktest_trade_count
-    report.best_annualized_trades = round(
-        rebacktest_trade_count / _timerange_years(timerange), 1
+    raise ValueError(
+        "Hyperopt parameter handoff verification failed: Freqtrade's selected "
+        f"candidate produced {report.best_trade_count} trades, but the exported "
+        f"backtest produced {rebacktest_trade_count}. No snapshot was saved."
     )
-    report.summary += f" Hyperopt evaluated {report.hyperopt_trade_count} trades; the final re-backtest produced {rebacktest_trade_count} trades with the exported parameters."
-    return report
 
 
 def _read_json(path: Path) -> dict[str, Any]:

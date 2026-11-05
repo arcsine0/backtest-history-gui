@@ -41,13 +41,13 @@ NODE = NodeDefinition(
         bool_output("is_tight", "Range width is below threshold"),
     ),
     parameters=(
-        int_param("period", 20, "Range lookback period.", 2, 500),
+        int_param("period", 20, "Range lookback period.", 5, 100),
         decimal_param(
             "max_width_pct",
             0.03,
             "Maximum high-low width relative to close.",
             0.0001,
-            1.0,
+            0.10,
         ),
     ),
 )

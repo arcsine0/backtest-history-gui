@@ -33,7 +33,7 @@ NODE = NodeDefinition(
     outputs=(series_output("value", "VWAP"),),
     parameters=(
         int_param(
-            "period", 96, "Rolling VWAP lookback; use one session in candles.", 2, 1000
+            "period", 96, "Rolling VWAP lookback; use one session in candles.", 12, 288
         ),
     ),
 )

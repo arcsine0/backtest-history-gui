@@ -16,5 +16,5 @@ NODE = NodeDefinition(
     "Carries the last valid value forward for a bounded number of candles.",
     inputs=(series_input("source", "Series with intermittent valid values."),),
     outputs=(series_output("value", "Forward-filled series"),),
-    parameters=(int_param("limit", 48, "Maximum candles to retain a value.", 1, 1000),),
+    parameters=(int_param("limit", 48, "Maximum candles to retain a value.", 1, 200),),
 )

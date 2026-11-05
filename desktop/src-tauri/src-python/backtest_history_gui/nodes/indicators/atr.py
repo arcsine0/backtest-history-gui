@@ -26,5 +26,5 @@ NODE = NodeDefinition(
         series_input("close", "Candle close."),
     ),
     outputs=(series_output("value", "ATR"),),
-    parameters=(int_param("period", 14, "ATR lookback period.", 2, 100),),
+    parameters=(int_param("period", 14, "ATR lookback period.", 5, 50),),
 )

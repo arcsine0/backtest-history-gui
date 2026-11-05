@@ -1,4 +1,4 @@
-from ..contracts import NodeDefinition, decimal_param, series_output
+from ..contracts import NodeDefinition, Parameter, series_output
 
 NODE = NodeDefinition(
     "input.constant",
@@ -7,7 +7,15 @@ NODE = NodeDefinition(
     "A scalar value broadcast across every candle.",
     outputs=(series_output("value", "Constant series"),),
     parameters=(
-        decimal_param("value", 0.0, "Constant numeric value.", -1_000_000, 1_000_000),
+        Parameter(
+            "value",
+            "decimal",
+            0.0,
+            "Fixed numeric value. Use an Optimizable parameter node to expose a range.",
+            -1_000_000,
+            1_000_000,
+            optimizable=False,
+        ),
     ),
 )
 

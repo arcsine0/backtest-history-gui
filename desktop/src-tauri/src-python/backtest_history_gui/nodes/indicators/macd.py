@@ -28,8 +28,8 @@ NODE = NodeDefinition(
         series_output("histogram", "MACD histogram"),
     ),
     parameters=(
-        int_param("fast_period", 12, "Fast EMA period.", 2, 100),
-        int_param("slow_period", 26, "Slow EMA period.", 3, 250),
-        int_param("signal_period", 9, "Signal EMA period.", 2, 100),
+        int_param("fast_period", 12, "Fast EMA period.", 4, 20),
+        int_param("slow_period", 26, "Slow EMA period.", 21, 80),
+        int_param("signal_period", 9, "Signal EMA period.", 3, 20),
     ),
 )

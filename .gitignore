@@ -151,3 +151,6 @@ __pycache__/
 
 # Local Freqtrade data, generated strategies, and SQLite snapshots
 data/
+
+# Temporary Chrome profiles and caches used for local debugging
+/.tmp-chrome-*/

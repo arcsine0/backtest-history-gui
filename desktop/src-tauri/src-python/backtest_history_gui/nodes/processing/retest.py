@@ -8,18 +8,23 @@ from ..contracts import (
 
 
 def compile_node(context):
-    low, high, close, level, tolerance = (
+    low, high, close, level, tolerance, validity = (
         context.input("low"),
         context.input("high"),
         context.input("close"),
         context.input("level"),
         context.parameter("tolerance_pct"),
+        context.parameter("validity_candles"),
+    )
+    bullish_touch = f"({low} <= {level} * (1 + {tolerance}))"
+    bearish_touch = f"({high} >= {level} * (1 - {tolerance}))"
+    context.bind_output(
+        "bullish",
+        f"{bullish_touch}.rolling({validity}).max().fillna(0).astype(bool) & ({close} >= {level})",
     )
     context.bind_output(
-        "bullish", f"({low} <= {level} * (1 + {tolerance})) & ({close} >= {level})"
-    )
-    context.bind_output(
-        "bearish", f"({high} >= {level} * (1 - {tolerance})) & ({close} <= {level})"
+        "bearish",
+        f"{bearish_touch}.rolling({validity}).max().fillna(0).astype(bool) & ({close} <= {level})",
     )
     return context.finalize()
 
@@ -41,14 +46,14 @@ NODE = NodeDefinition(
     ),
     parameters=(
         decimal_param(
-            "tolerance_pct", 0.003, "Allowed distance from the level.", 0.0001, 0.10
+            "tolerance_pct", 0.003, "Allowed distance from the level.", 0.0005, 0.02
         ),
         int_param(
             "validity_candles",
             12,
             "Candles during which the level can be retested.",
             1,
-            500,
+            50,
         ),
     ),
 )

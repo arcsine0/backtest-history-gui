@@ -22,5 +22,5 @@ NODE = NodeDefinition(
     "Relative Strength Index.",
     inputs=(series_input("source", "Price series."),),
     outputs=(series_output("value", "RSI from 0 to 100"),),
-    parameters=(int_param("period", 14, "RSI lookback period.", 2, 100),),
+    parameters=(int_param("period", 14, "RSI lookback period.", 5, 50),),
 )

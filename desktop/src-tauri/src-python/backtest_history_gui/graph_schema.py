@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-GRAPH_VERSION = 1
+GRAPH_VERSION = 2
+SUPPORTED_GRAPH_VERSIONS = frozenset({1, GRAPH_VERSION})
 
 
 @dataclass(frozen=True)

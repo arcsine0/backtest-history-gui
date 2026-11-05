@@ -22,5 +22,5 @@ NODE = NodeDefinition(
     "Simple moving average.",
     inputs=(series_input("source", "Price or numeric series."),),
     outputs=(series_output("value", "SMA"),),
-    parameters=(int_param("period", 100, "SMA lookback period.", 2, 500),),
+    parameters=(int_param("period", 100, "SMA lookback period.", 5, 300),),
 )

@@ -22,7 +22,7 @@ NODE = NodeDefinition(
     inputs=(series_input("source", "Numeric series."),),
     outputs=(series_output("value", "Rolling result"),),
     parameters=(
-        int_param("period", 20, "Lookback period.", 2, 1000),
+        int_param("period", 20, "Lookback period.", 5, 200),
         Parameter(
             "operation",
             "choice",

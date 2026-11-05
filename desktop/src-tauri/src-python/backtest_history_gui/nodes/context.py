@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .contracts import NodeDefinition, Parameter
+from .contracts import NodeDefinition, Parameter, Port
 
 
 class NodeCompileError(ValueError):
@@ -56,9 +56,10 @@ class NodeCompileContext:
         for parameter in self.definition.parameters:
             _validate_parameter(parameter, self.parameter_value(parameter.key))
         for port in self.definition.inputs:
-            if port.required and port.key not in self.inputs:
+            connected = self.input_values(port.key)
+            if port.required and len(connected) < port.minimum_connections:
                 raise NodeCompileError(
-                    f"{self.definition.id} requires input `{port.key}`."
+                    f"{self.definition.id} requires at least {port.minimum_connections} connection(s) for input `{port.key}`."
                 )
 
     def input(self, key: str) -> str:
@@ -71,6 +72,23 @@ class NodeCompileContext:
             raise NodeCompileError(
                 f"{self.definition.id} has no connection for optional input `{key}`."
             ) from error
+
+    def input_values(self, key: str) -> tuple[str, ...]:
+        """Return all values connected to a fixed or variadic input port."""
+        port = _port_for_key(key, self.definition.inputs)
+        if port is None:
+            raise NodeCompileError(f"{self.definition.id} has no input `{key}`.")
+        if not port.variadic:
+            return (self.input(key),) if key in self.inputs else ()
+        values = [
+            (input_key, value)
+            for input_key, value in self.inputs.items()
+            if _port_matches(port, input_key)
+        ]
+        return tuple(
+            value
+            for _, value in sorted(values, key=lambda item: _port_sort_key(item[0]))
+        )
 
     def parameter_value(self, key: str) -> Any:
         """Return a validated literal parameter value, falling back to its default."""
@@ -171,12 +189,27 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 def _validate_keys(
     kind: str, supplied: Mapping[str, Any], definitions: tuple[Any, ...]
 ) -> None:
-    allowed = {item.key for item in definitions}
-    unknown = sorted(set(supplied) - allowed)
+    unknown = sorted(key for key in supplied if _port_for_key(key, definitions) is None)
     if unknown:
         raise NodeCompileError(
             f"{kind.capitalize()} `{unknown[0]}` is not defined for this node."
         )
+
+
+def _port_matches(port: Port, key: str) -> bool:
+    return key == port.key or (
+        getattr(port, "variadic", False)
+        and re.fullmatch(rf"{re.escape(port.key)}_[1-9][0-9]*", key) is not None
+    )
+
+
+def _port_for_key(key: str, ports: tuple[Any, ...]) -> Any | None:
+    return next((port for port in ports if _port_matches(port, key)), None)
+
+
+def _port_sort_key(key: str) -> tuple[int, int]:
+    match = re.fullmatch(r".+_([1-9][0-9]*)", key)
+    return (0, 1) if match is None else (1, int(match.group(1)))
 
 
 def _validate_parameter(parameter: Parameter, value: Any) -> None:

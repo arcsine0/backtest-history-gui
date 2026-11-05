@@ -1,2 +1,7 @@
 @import "tailwindcss";
 @plugin "daisyui";
+
+input[type="number"]::-webkit-inner-spin-button {
+  transform: scale(0.65);
+  transform-origin: center;
+}

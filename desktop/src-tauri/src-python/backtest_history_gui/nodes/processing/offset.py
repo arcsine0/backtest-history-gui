@@ -8,7 +8,7 @@ NODE = NodeDefinition(
     inputs=(series_input("source", "Numeric series."),),
     outputs=(series_output("value", "Shifted series"),),
     parameters=(
-        int_param("candles", 1, "Completed candles to shift backward.", 1, 500),
+        int_param("candles", 1, "Completed candles to shift backward.", 1, 100),
     ),
 )
 

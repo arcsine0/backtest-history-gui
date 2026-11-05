@@ -9,9 +9,9 @@ NODE = NodeDefinition(
     outputs=(Port("stoploss", "scalar.number", True, "Dynamic stop loss ratio"),),
     parameters=(
         decimal_param(
-            "activation_pct", 0.03, "Profit ratio required to arm.", 0.001, 1.0
+            "activation_pct", 0.03, "Profit ratio required to arm.", 0.005, 0.15
         ),
-        decimal_param("trail_pct", 0.02, "Distance below trade high.", 0.001, 0.50),
+        decimal_param("trail_pct", 0.02, "Distance below trade high.", 0.002, 0.075),
     ),
 )
 

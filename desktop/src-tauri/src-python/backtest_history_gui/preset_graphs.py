@@ -180,7 +180,7 @@ def fvg_retest_atr_graph() -> StrategyGraph:
             GraphNode("upper", "process.forward_fill", {"limit": 48}),
             GraphNode("tolerance", "input.constant", {"value": 1.003}),
             GraphNode(
-                "upper_tolerance", "process.arithmetic", {"operation": "multiply"}
+                "upper_tolerance", "arithmetic.operations", {"operation": "multiply"}
             ),
             GraphNode(
                 "touches_zone", "process.comparison", {"operator": "less_or_equal"}
@@ -207,8 +207,8 @@ def fvg_retest_atr_graph() -> StrategyGraph:
             GraphEdge("fvg", "bullish_upper", "upper_offset", "source"),
             GraphEdge("lower_offset", "value", "lower", "source"),
             GraphEdge("upper_offset", "value", "upper", "source"),
-            GraphEdge("upper", "value", "upper_tolerance", "left"),
-            GraphEdge("tolerance", "value", "upper_tolerance", "right"),
+            GraphEdge("upper", "value", "upper_tolerance", "inputs"),
+            GraphEdge("tolerance", "value", "upper_tolerance", "inputs_2"),
             GraphEdge("candles", "low", "touches_zone", "left"),
             GraphEdge("upper_tolerance", "value", "touches_zone", "right"),
             GraphEdge("candles", "close", "reclaims_lower", "left"),
@@ -320,7 +320,7 @@ def bollinger_rsi_graph() -> StrategyGraph:
             GraphNode("rsi_max", "input.constant", {"value": 35}),
             GraphNode("reentry_pct", "input.constant", {"value": 1.01}),
             GraphNode(
-                "reentry_ceiling", "process.arithmetic", {"operation": "multiply"}
+                "reentry_ceiling", "arithmetic.operations", {"operation": "multiply"}
             ),
             GraphNode(
                 "near_lower", "process.comparison", {"operator": "less_or_equal"}
@@ -332,8 +332,8 @@ def bollinger_rsi_graph() -> StrategyGraph:
         edges=(
             GraphEdge("candles", "close", "bands", "source"),
             GraphEdge("candles", "close", "rsi", "source"),
-            GraphEdge("bands", "lower", "reentry_ceiling", "left"),
-            GraphEdge("reentry_pct", "value", "reentry_ceiling", "right"),
+            GraphEdge("bands", "lower", "reentry_ceiling", "inputs"),
+            GraphEdge("reentry_pct", "value", "reentry_ceiling", "inputs_2"),
             GraphEdge("candles", "close", "near_lower", "left"),
             GraphEdge("reentry_ceiling", "value", "near_lower", "right"),
             GraphEdge("rsi", "value", "rsi_zone", "source"),

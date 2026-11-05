@@ -42,9 +42,9 @@ NODE = NodeDefinition(
             "minimum_gap_pct",
             0.002,
             "Minimum gap relative to the older candle.",
-            0.0001,
-            0.20,
+            0.0005,
+            0.0095,
         ),
-        decimal_param("maximum_gap_pct", 0.03, "Maximum accepted gap.", 0.0001, 0.50),
+        decimal_param("maximum_gap_pct", 0.03, "Maximum accepted gap.", 0.01, 0.05),
     ),
 )

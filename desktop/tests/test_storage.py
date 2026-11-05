@@ -42,6 +42,7 @@ from backtest_history_gui.nodes import (
     node_compile_context,
 )
 from backtest_history_gui.graph_compiler import (
+    GraphCompileError,
     compile_graph_fragments,
     graph_parameters,
     topological_nodes,
@@ -141,10 +142,15 @@ class FreqtradeStorageTests(unittest.TestCase):
             2.5,
         )
 
+    def test_saved_version_one_graph_is_normalized_to_the_current_version(self):
+        payload = json.loads(json.dumps(PRESET_GRAPHS["fvg_atr"]().as_dict()))
+        payload["version"] = 1
+        self.assertEqual(ai_strategy.graph_from_payload(payload).version, 2)
+
     def test_node_catalog_is_unique_serializable_and_exposes_indicator_parameters(self):
         catalog = node_catalog()
         json.dumps(catalog)
-        self.assertEqual(catalog["version"], 1)
+        self.assertEqual(catalog["version"], 2)
         self.assertEqual(
             len(catalog["nodes"]), len({node["id"] for node in catalog["nodes"]})
         )
@@ -187,10 +193,18 @@ class FreqtradeStorageTests(unittest.TestCase):
 
     def test_shared_node_compile_context_supports_every_catalog_node(self):
         for index, node in enumerate(NODES):
+            inputs = {
+                port.key: f"input_{port.key}" for port in node.inputs
+            }
+            for port in node.inputs:
+                for connection in range(2, port.minimum_connections + 1):
+                    inputs[f"{port.key}_{connection}"] = (
+                        f"input_{port.key}_{connection}"
+                    )
             context = node_compile_context(
                 node.id,
                 f"node_{index}",
-                inputs={port.key: f"input_{port.key}" for port in node.inputs},
+                inputs=inputs,
             )
             for output in node.outputs:
                 self.assertIn(
@@ -210,6 +224,105 @@ class FreqtradeStorageTests(unittest.TestCase):
         self.assertIn(
             "node_trend_value", "\n".join(compiled["statements"]["indicators"])
         )
+
+    def test_variadic_logic_gates_compile_with_numbered_ports(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode("candles", "input.ohlcv"),
+                GraphNode("first", "process.comparison"),
+                GraphNode("second", "process.comparison"),
+                GraphNode("third", "process.comparison"),
+                GraphNode("gate", "logic.xor"),
+            ),
+            edges=(
+                GraphEdge("candles", "close", "first", "left"),
+                GraphEdge("candles", "open", "first", "right"),
+                GraphEdge("candles", "high", "second", "left"),
+                GraphEdge("candles", "low", "second", "right"),
+                GraphEdge("candles", "volume", "third", "left"),
+                GraphEdge("candles", "volume", "third", "right"),
+                GraphEdge("first", "result", "gate", "inputs"),
+                GraphEdge("second", "result", "gate", "inputs_2"),
+                GraphEdge("third", "result", "gate", "inputs_3"),
+            ),
+        )
+        compiled = compile_graph_fragments(graph)
+        statements = "\n".join(compiled["statements"]["conditions"])
+        self.assertIn("node_first_result", statements)
+        self.assertIn("node_second_result", statements)
+        self.assertIn("node_third_result", statements)
+        self.assertIn("^", statements)
+
+    def test_variadic_nodes_require_their_minimum_connections(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode("candles", "input.ohlcv"),
+                GraphNode("first", "process.comparison"),
+                GraphNode("gate", "logic.and"),
+            ),
+            edges=(
+                GraphEdge("candles", "close", "first", "left"),
+                GraphEdge("candles", "open", "first", "right"),
+                GraphEdge("first", "result", "gate", "inputs"),
+            ),
+        )
+        with self.assertRaisesRegex(GraphCompileError, "at least 2 connection"):
+            compile_graph_fragments(graph)
+
+    def test_variadic_arithmetic_and_statistics_compile(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode("candles", "input.ohlcv"),
+                GraphNode(
+                    "combined", "arithmetic.operations", {"operation": "multiply"}
+                ),
+                GraphNode(
+                    "average", "statistic.aggregate", {"operation": "average"}
+                ),
+            ),
+            edges=(
+                GraphEdge("candles", "close", "combined", "inputs"),
+                GraphEdge("candles", "high", "combined", "inputs_2"),
+                GraphEdge("candles", "low", "combined", "inputs_3"),
+                GraphEdge("candles", "close", "average", "inputs"),
+                GraphEdge("candles", "high", "average", "inputs_2"),
+                GraphEdge("candles", "low", "average", "inputs_3"),
+            ),
+        )
+        compiled = compile_graph_fragments(graph)
+        statements = "\n".join(compiled["statements"]["indicators"])
+        self.assertIn("*", statements)
+        self.assertIn("pd.concat", statements)
+        self.assertIn("import pandas as pd", compiled["imports"])
+
+    def test_logic_and_unary_arithmetic_nodes_emit_real_source(self):
+        modules = {
+            "logic.and": "logic.and_gate",
+            "logic.or": "logic.or_gate",
+            "logic.nand": "logic.nand",
+            "logic.nor": "logic.nor",
+            "logic.xor": "logic.xor",
+            "logic.not": "logic.not_gate",
+            "arithmetic.round": "arithmetic.round",
+            "arithmetic.flatten": "arithmetic.flatten",
+        }
+        for node_id, module_name in modules.items():
+            inputs = (
+                {"condition": "condition"}
+                if node_id == "logic.not"
+                else (
+                    {"source": "dataframe['close']"}
+                    if node_id.startswith("arithmetic.")
+                    else {"inputs": "first", "inputs_2": "second"}
+                )
+            )
+            context = node_compile_context(node_id, "test_node", inputs=inputs)
+            module = importlib.import_module(
+                f"backtest_history_gui.nodes.{module_name}"
+            )
+            fragment = module.compile_node(context)
+            self.assertIn("value" if node_id.startswith("arithmetic.") else "result", fragment.outputs)
+            self.assertTrue(fragment.statements)
 
     def test_registered_preset_graphs_have_valid_node_connections(self):
         for graph_factory in PRESET_GRAPHS.values():
@@ -268,7 +381,7 @@ class FreqtradeStorageTests(unittest.TestCase):
             setup = templates.make_template_strategy("FVG ATR", "fvg_atr", directory)
             graph = setup.freqtrade_payload["graph"]
             self.assertEqual(setup.freqtrade_payload["format"], "freqtrade-graph-v1")
-            self.assertEqual(graph["version"], 1)
+            self.assertEqual(graph["version"], 2)
             self.assertEqual(setup.freqtrade_payload["entry_id"], "fvg")
             self.assertEqual(setup.freqtrade_payload["exit_id"], "atr_trailing")
             self.assertIn(
@@ -495,9 +608,9 @@ class FreqtradeStorageTests(unittest.TestCase):
         )
         baked = runner.apply_parameter_file_to_source(source, parameter_file)
         self.assertIn("stoploss = -0.25", baked)
-        self.assertIn("ema_period = IntParameter(2, 500, default=42", baked)
+        self.assertIn("ema_period = IntParameter(5, 300, default=42", baked)
         self.assertIn(
-            "initial_stop_loss_pct = DecimalParameter(0.005, 0.25, default=0.05", baked
+            "initial_stop_loss_pct = DecimalParameter(0.01, 0.15, default=0.05", baked
         )
         self.assertEqual(
             runner.normalize_parameter_file(
@@ -505,6 +618,32 @@ class FreqtradeStorageTests(unittest.TestCase):
             )["params"]["exit"]["initial_stop_loss_pct"],
             0.15,
         )
+
+    def test_clamps_saved_hyperopt_values_to_current_catalog_ranges(self):
+        source = templates.make_template_strategy(
+            "FVG", "fvg_atr", "."
+        ).freqtrade_payload["strategy_source"]
+        baked = runner.apply_parameter_file_to_source(
+            source,
+            {
+                "params": {
+                    "enter": {
+                        "fvg_minimum_gap_pct": 0.0883,
+                        "fvg_maximum_gap_pct": 0.2547,
+                        "ema_period": 500,
+                    }
+                }
+            },
+        )
+        self.assertIn(
+            "fvg_minimum_gap_pct = DecimalParameter(0.0005, 0.0095, default=0.0095",
+            baked,
+        )
+        self.assertIn(
+            "fvg_maximum_gap_pct = DecimalParameter(0.01, 0.05, default=0.05",
+            baked,
+        )
+        self.assertIn("ema_period = IntParameter(5, 300, default=300", baked)
 
     def test_reports_when_frequency_goal_is_not_feasible(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -604,7 +743,7 @@ class FreqtradeStorageTests(unittest.TestCase):
             self.assertEqual(report.selection_status, "feasible")
             self.assertEqual(parameter_file["params"]["enter"]["enter_ema_period"], 24)
 
-    def test_rebacktest_trade_count_becomes_the_persisted_result(self):
+    def test_rebacktest_trade_count_mismatch_rejects_the_hyperopt_result(self):
         report = models.OptimizationReport(
             target_trades_per_year=100,
             best_trade_count=6,
@@ -615,12 +754,31 @@ class FreqtradeStorageTests(unittest.TestCase):
             goal_met=False,
             summary="Infeasible",
         )
-        reconciled = runner.reconcile_optimization_report(
-            report, 7, "20251030-20261029"
+        with self.assertRaisesRegex(
+            ValueError, "Hyperopt parameter handoff verification failed"
+        ):
+            runner.reconcile_optimization_report(report, 7, "20251030-20261029")
+
+    def test_node_catalog_uses_feasible_fvg_ranges_and_fixed_constants(self):
+        nodes = {node.id: node for node in NODES}
+        fvg = {parameter.key: parameter for parameter in nodes["pattern.fair_value_gap"].parameters}
+        self.assertLess(fvg["minimum_gap_pct"].maximum, fvg["maximum_gap_pct"].minimum)
+        constant = nodes["input.constant"].parameters[0]
+        self.assertFalse(constant.optimizable)
+
+    def test_graph_parameters_reject_invalid_linked_parameter_values(self):
+        graph = StrategyGraph(
+            nodes=(
+                GraphNode(
+                    "invalid_fvg",
+                    "pattern.fair_value_gap",
+                    {"minimum_gap_pct": 0.01, "maximum_gap_pct": 0.01},
+                ),
+            ),
+            edges=(),
         )
-        self.assertEqual(reconciled.hyperopt_trade_count, 6)
-        self.assertEqual(reconciled.best_trade_count, 7)
-        self.assertIn("final re-backtest produced 7", reconciled.summary)
+        with self.assertRaisesRegex(GraphCompileError, "minimum_gap_pct"):
+            graph_parameters(graph)
 
     def test_generates_safe_workspace_config_when_not_supplied(self):
         with tempfile.TemporaryDirectory() as directory:

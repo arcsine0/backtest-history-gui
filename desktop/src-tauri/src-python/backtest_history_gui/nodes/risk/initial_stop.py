@@ -12,8 +12,8 @@ NODE = NodeDefinition(
             "loss_pct",
             0.08,
             "Maximum loss ratio before trailing logic activates.",
-            0.005,
-            0.25,
+            0.01,
+            0.15,
         ),
     ),
 )

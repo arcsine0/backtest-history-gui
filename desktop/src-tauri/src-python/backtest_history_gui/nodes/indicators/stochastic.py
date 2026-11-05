@@ -26,8 +26,8 @@ NODE = NodeDefinition(
     ),
     outputs=(series_output("k", "Stochastic K"), series_output("d", "Stochastic D")),
     parameters=(
-        int_param("k_period", 14, "K lookback.", 2, 100),
-        int_param("d_period", 3, "D smoothing.", 1, 50),
-        int_param("slowing", 3, "K slowing.", 1, 50),
+        int_param("k_period", 14, "K lookback.", 5, 50),
+        int_param("d_period", 3, "D smoothing.", 2, 15),
+        int_param("slowing", 3, "K slowing.", 1, 10),
     ),
 )

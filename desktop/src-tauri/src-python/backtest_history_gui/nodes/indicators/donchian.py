@@ -30,5 +30,5 @@ NODE = NodeDefinition(
         series_output("lower", "Channel low"),
         series_output("middle", "Channel midpoint"),
     ),
-    parameters=(int_param("period", 20, "Channel lookback period.", 2, 500),),
+    parameters=(int_param("period", 20, "Channel lookback period.", 5, 200),),
 )

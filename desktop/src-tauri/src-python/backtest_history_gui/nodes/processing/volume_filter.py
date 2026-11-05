@@ -30,9 +30,9 @@ NODE = NodeDefinition(
         bool_output("above_baseline", "Volume passes threshold"),
     ),
     parameters=(
-        int_param("period", 20, "Volume lookback period.", 2, 500),
+        int_param("period", 20, "Volume lookback period.", 5, 100),
         decimal_param(
-            "multiplier", 1.0, "Required volume relative to baseline.", 0.1, 10.0, 2
+            "multiplier", 1.0, "Required volume relative to baseline.", 0.5, 3.0, 2
         ),
     ),
 )

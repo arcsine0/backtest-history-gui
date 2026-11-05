@@ -40,6 +40,6 @@ NODE = NodeDefinition(
         series_output("last_swing_low", "Most recent confirmed swing low"),
     ),
     parameters=(
-        int_param("strength", 3, "Completed candles required on each side.", 1, 50),
+        int_param("strength", 3, "Completed candles required on each side.", 1, 10),
     ),
 )

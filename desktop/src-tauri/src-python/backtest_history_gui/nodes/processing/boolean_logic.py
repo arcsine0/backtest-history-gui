@@ -2,9 +2,9 @@ from ..contracts import NodeDefinition, Parameter, bool_input, bool_output
 
 NODE = NodeDefinition(
     "process.boolean",
-    "processing",
+    "logic",
     "Boolean logic",
-    "Combines two boolean conditions.",
+    "Compatibility node for a selectable two-input boolean operation. Prefer the dedicated Logic gates for new graphs.",
     inputs=(
         bool_input("left", "Left condition."),
         bool_input("right", "Right condition.", False),
@@ -16,7 +16,7 @@ NODE = NodeDefinition(
             "choice",
             "and",
             "Boolean operation.",
-            choices=("and", "or", "xor", "not"),
+            choices=("and", "or", "xor", "nand", "nor", "not"),
             optimizable=False,
         ),
     ),
@@ -31,6 +31,8 @@ def compile_node(context):
         "and": f"{left} & {right}",
         "or": f"{left} | {right}",
         "xor": f"{left} ^ {right}",
+        "nand": f"~({left} & {right})",
+        "nor": f"~({left} | {right})",
         "not": f"~{left}",
     }
     context.bind_output("result", expressions[operation])

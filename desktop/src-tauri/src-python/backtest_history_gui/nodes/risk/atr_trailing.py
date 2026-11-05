@@ -15,11 +15,11 @@ NODE = NodeDefinition(
             "activation_atr",
             1.5,
             "Profit move in ATR units required to arm the trail.",
-            0.1,
-            10.0,
+            0.5,
+            5.0,
             2,
         ),
-        decimal_param("trail_atr", 2.5, "ATR distance below trade high.", 0.1, 10.0, 2),
+        decimal_param("trail_atr", 2.5, "ATR distance below trade high.", 0.5, 5.0, 2),
     ),
 )
 

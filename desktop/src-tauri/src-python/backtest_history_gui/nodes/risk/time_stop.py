@@ -7,7 +7,7 @@ NODE = NodeDefinition(
     "Forces an exit after a maximum number of held candles.",
     inputs=(Port("trade", "trade", True, "Open trade."),),
     outputs=(Port("exit", "signal.exit", True, "Exit signal when expired"),),
-    parameters=(int_param("max_hold_candles", 288, "Maximum held candles.", 1, 10000),),
+    parameters=(int_param("max_hold_candles", 288, "Maximum held candles.", 12, 2016),),
 )
 
 

@@ -30,5 +30,5 @@ NODE = NodeDefinition(
         series_output("plus_di", "Positive directional index"),
         series_output("minus_di", "Negative directional index"),
     ),
-    parameters=(int_param("period", 14, "ADX lookback period.", 2, 100),),
+    parameters=(int_param("period", 14, "ADX lookback period.", 5, 50),),
 )

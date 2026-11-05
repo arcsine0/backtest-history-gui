@@ -11,6 +11,7 @@
     "prepare:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/download-py.ps1"
   },
   "dependencies": {
+    "@lucide/vue": "1.69.0",
     "@tauri-apps/api": "2.9.1",
     "@tauri-apps/plugin-dialog": "2.4.1",
     "@tauri-apps/plugin-opener": "^2",

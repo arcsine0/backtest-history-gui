@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from .graph_compiler import GraphCompileError, compile_freqtrade_graph, graph_parameters
-from .graph_schema import GRAPH_VERSION, GraphEdge, GraphNode, StrategyGraph
+from .graph_schema import (
+    GRAPH_VERSION,
+    SUPPORTED_GRAPH_VERSIONS,
+    GraphEdge,
+    GraphNode,
+    StrategyGraph,
+)
 from .models import (
     PROJECT_ROOT,
     AiStrategyGraphRequest,
@@ -38,7 +44,7 @@ _OUTPUT_SCHEMA = {
             "additionalProperties": False,
             "required": ["version", "nodes", "edges"],
             "properties": {
-                "version": {"type": "integer"},
+                "version": {"type": "integer", "enum": [GRAPH_VERSION]},
                 "nodes": {
                     "type": "array",
                     "items": {
@@ -215,6 +221,7 @@ def _system_prompt() -> str:
             "You design a long-only Freqtrade strategy as a node graph.",
             "Return only the structured response requested by the API.",
             "Use only node types, ports, and parameter keys in the supplied catalog.",
+            f"Set graph.version to {GRAPH_VERSION}; this is separate from the catalog version.",
             "Every node id must be unique lowercase snake_case (for example, ema_fast or entry_signal); never use spaces, hyphens, or uppercase letters.",
             "Every required input must have one compatible incoming edge.",
             "Use input.ohlcv for candle fields, include signal.enter_long, risk.initial_stop, and a dynamic risk exit when suitable.",
@@ -248,7 +255,10 @@ def _market_context(request: AiStrategyGraphRequest) -> dict[str, str]:
 
 
 def graph_from_payload(payload: Any) -> StrategyGraph:
-    if not isinstance(payload, dict) or payload.get("version") != GRAPH_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") not in SUPPORTED_GRAPH_VERSIONS
+    ):
         raise ValueError(f"AI strategy graph must use version {GRAPH_VERSION}.")
     raw_nodes = payload.get("nodes")
     raw_edges = payload.get("edges")

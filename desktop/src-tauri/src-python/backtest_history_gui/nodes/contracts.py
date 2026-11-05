@@ -23,6 +23,8 @@ class Port:
     value_type: PortType
     required: bool = True
     description: str = ""
+    variadic: bool = False
+    minimum_connections: int = 1
 
 
 @dataclass(frozen=True)
@@ -56,8 +58,34 @@ def series_input(key: str, description: str, required: bool = True) -> Port:
     return Port(key, "series.number", required, description)
 
 
+def variadic_series_input(
+    key: str, description: str, minimum_connections: int = 2
+) -> Port:
+    return Port(
+        key,
+        "series.number",
+        True,
+        description,
+        variadic=True,
+        minimum_connections=minimum_connections,
+    )
+
+
 def bool_input(key: str, description: str, required: bool = True) -> Port:
     return Port(key, "series.boolean", required, description)
+
+
+def variadic_bool_input(
+    key: str, description: str, minimum_connections: int = 2
+) -> Port:
+    return Port(
+        key,
+        "series.boolean",
+        True,
+        description,
+        variadic=True,
+        minimum_connections=minimum_connections,
+    )
 
 
 def scalar_input(key: str, description: str, required: bool = True) -> Port:
@@ -86,4 +114,12 @@ def decimal_param(
     maximum: float,
     decimals: int = 4,
 ) -> Parameter:
-    return Parameter(key, "decimal", default, description, minimum, maximum, decimals)
+    return Parameter(
+        key,
+        "decimal",
+        default,
+        description,
+        minimum,
+        maximum,
+        decimals,
+    )

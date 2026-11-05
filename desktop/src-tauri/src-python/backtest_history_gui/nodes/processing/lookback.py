@@ -7,7 +7,7 @@ NODE = NodeDefinition(
     "Keeps a condition true for a bounded number of completed candles.",
     inputs=(bool_input("condition", "Condition to retain."),),
     outputs=(bool_output("result", "Condition occurred recently"),),
-    parameters=(int_param("candles", 3, "Completed candles after the event.", 1, 500),),
+    parameters=(int_param("candles", 3, "Completed candles after the event.", 1, 50),),
 )
 
 

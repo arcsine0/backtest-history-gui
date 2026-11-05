@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from .contracts import NodeDefinition
+from .arithmetic.flatten import NODE as FLATTEN
+from .arithmetic.operations import NODE as ARITHMETIC_OPERATIONS
+from .arithmetic.round import NODE as ROUND
 from .indicators.adx import NODE as ADX
 from .indicators.atr import NODE as ATR
 from .indicators.bollinger import NODE as BOLLINGER
@@ -18,7 +21,7 @@ from .inputs.constant import NODE as CONSTANT
 from .inputs.ohlcv import NODE as OHLCV
 from .inputs.parameter import NODE as PARAMETER
 from .inputs.trade_state import NODE as TRADE_STATE
-from .processing.arithmetic import NODE as ARITHMETIC
+from .logic.and_gate import NODE as AND
 from .processing.boolean_logic import NODE as BOOLEAN
 from .processing.breakout import NODE as BREAKOUT
 from .processing.comparison import NODE as COMPARISON
@@ -33,6 +36,11 @@ from .processing.rolling import NODE as ROLLING
 from .processing.swing import NODE as SWING
 from .processing.threshold_zone import NODE as THRESHOLD_ZONE
 from .processing.volume_filter import NODE as VOLUME_FILTER
+from .logic.nand import NODE as NAND
+from .logic.nor import NODE as NOR
+from .logic.not_gate import NODE as NOT
+from .logic.or_gate import NODE as OR
+from .logic.xor import NODE as XOR
 from .risk.atr_trailing import NODE as ATR_TRAILING
 from .risk.initial_stop import NODE as INITIAL_STOP
 from .risk.profit_trailing import NODE as PROFIT_TRAILING
@@ -41,8 +49,9 @@ from .risk.time_stop import NODE as TIME_STOP
 from .signals.enter_long import NODE as ENTER_LONG
 from .signals.exit_long import NODE as EXIT_LONG
 from .signals.skip import NODE as SKIP
+from .statistics.aggregate import NODE as STATISTIC_AGGREGATE
 
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 NODES: tuple[NodeDefinition, ...] = (
     OHLCV,
     CONSTANT,
@@ -59,9 +68,18 @@ NODES: tuple[NodeDefinition, ...] = (
     ADX,
     DONCHIAN,
     OBV,
-    ARITHMETIC,
+    ARITHMETIC_OPERATIONS,
+    ROUND,
+    FLATTEN,
+    STATISTIC_AGGREGATE,
     COMPARISON,
     BOOLEAN,
+    AND,
+    OR,
+    NAND,
+    NOR,
+    XOR,
+    NOT,
     OFFSET,
     ROLLING,
     CROSSOVER,

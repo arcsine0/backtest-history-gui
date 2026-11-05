@@ -15,7 +15,7 @@ NODE = NodeDefinition(
         bool_output("bearish", "Downside breakdown"),
     ),
     parameters=(
-        decimal_param("buffer_pct", 0.001, "Required close-through buffer.", 0.0, 0.10),
+        decimal_param("buffer_pct", 0.001, "Required close-through buffer.", 0.0, 0.02),
     ),
 )
 
